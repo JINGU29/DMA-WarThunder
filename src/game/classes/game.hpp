@@ -7,6 +7,17 @@ public:
 		return this->base_address != 0;
 	}
 
+	// 重新初始化：在非存活/非观战状态时调用
+	auto reinit( ) -> bool {
+		if ( !init( ) )
+			return false;
+		if ( !ballistics->init( this->base_address ) )
+			return false;
+		if ( !camera->init( this->base_address ) )
+			return false;
+		return true;
+	}
+
 	auto get_base( ) -> uintptr_t {
 		return this->base_address;
 	}

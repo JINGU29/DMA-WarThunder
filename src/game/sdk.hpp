@@ -4,6 +4,7 @@
 #include "datatypes\vector2.hpp"
 #include "datatypes\vector3.hpp"
 #include "datatypes\matrix.hpp"
+#include "datatypes\game_data.hpp"
 
 #define OFFSETS_WITH_BA(type, offset) \
     TargetProcess->Read< type >(this->base_address + (offset));

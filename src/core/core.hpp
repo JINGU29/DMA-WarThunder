@@ -34,8 +34,9 @@ namespace core
         
             while ( true ) 
             {
-
-                misc::UpdateEntityList( );
+				// GameUpdate 线程：预计算所有渲染数据
+				// 内部包含缓存检查、scatter read、预计算、mutex 写入
+                misc::GameUpdate( );
 
                 std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
             }

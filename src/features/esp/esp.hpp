@@ -1,6 +1,13 @@
 #pragma once
 
-namespace esp 
+#include "..\..\game\datatypes\game_data.hpp"
+#include "..\..\game\datatypes\matrix.hpp"
+#include "..\..\game\datatypes\vector3.hpp"
+#include "..\..\game\datatypes\vector2.hpp"
+#include "..\..\utils\render\render.hpp"
+#include "..\..\features\misc\misc.hpp"
+
+namespace esp
 {
     inline std::array< vec3_t, 8 > calculate_bbox_corners( const vec3_t& position, const vec3_t& bbmin, const vec3_t& bbmax, const matrix3x4_t& rot )
     {
@@ -8,7 +15,6 @@ namespace esp
         const auto f = rot.forward;
         const auto u = rot.up;
 
-        // only 18 multipl
         const vec3_t rx0 = { r.x * bbmin.x, r.y * bbmin.x, r.z * bbmin.x };
         const vec3_t rx1 = { r.x * bbmax.x, r.y * bbmax.x, r.z * bbmax.x };
         const vec3_t fy0 = { f.x * bbmin.y, f.y * bbmin.y, f.z * bbmin.y };
@@ -35,7 +41,6 @@ namespace esp
             make( rx1, fy1, uz1 ),
         } };
     }
-
 
     inline void draw_wireframe_box( const std::array< vec2_t, 8 >& corners, ImU32 color, float thickness ) {
 
@@ -64,7 +69,6 @@ namespace esp
         int size = 10;
         int gap = 1;
         float thickness = 1.0f;
-        float outlineThickness = 3.0f;
 
         g_render->line( centerX - size, centerY, centerX - gap, centerY, color, thickness );
         g_render->line( centerX + gap, centerY, centerX + size, centerY, color, thickness );
@@ -72,121 +76,77 @@ namespace esp
         g_render->line( centerX, centerY + gap, centerX, centerY + size, color, thickness );
     }
 
-    inline auto run( ) -> void 
-	{
-        const auto camera_matrix = sdk::cGame->camera->getCameraMatrix( );
+    // 从共享数据中拷贝一份用于渲染（线程安全）
+    inline auto GetRenderData( ) -> SGameData
+    {
+        std::lock_guard<std::mutex> lock( misc::g_gameMutex );
+        return misc::g_gameData;
+    }
 
+    // 渲染主函数 — 纯绘制，无内存读取
+    inline auto run( ) -> void
+    {
         draw_crosshair( );
 
-        const auto gui_state = sdk::cLocalPlayer->getGuiState( );
-        if ( gui_state != GuiState::ALIVE && gui_state != GuiState::SPEC )
-			return;
+        // 从共享数据中拷贝一份
+        const SGameData renderData = GetRenderData( );
+        if ( !renderData.bIsValid )
+            return;
 
-        if ( sdk::cLocalPlayer->getLocalUnit( ).getInfo( ).isPlane( ) ) 
+        const matrix4x4_t& camera_matrix = renderData.gameCtx.viewMatrix;
+
+        // 飞机模式：绘制炸弹落点
+        if ( renderData.bLocalIsPlane && renderData.bHasBombImpact )
         {
-            vec3_t bombImpact = sdk::cGame->ballistics->getBombImpactPoint( );
-
             vec2_t screen_position;
-            if ( g_render->world_to_screen( bombImpact, screen_position, camera_matrix ) )
+            if ( g_render->world_to_screen( renderData.bombImpactPoint, screen_position, camera_matrix ) )
                 g_render->circle( screen_position.x, screen_position.y, 6.0f, IM_COL32( 255, 0, 200, 255 ), 16.0f );
-            
         }
 
-        // iter
-        std::vector< c_unit > units = misc::unitsList;
-		for ( c_unit& unit : units )
-		{
-            vec3_t unit_position = unit.getPosition( );
-			if ( unit_position.empty( ) )
-				continue;
-
-            vec2_t screen_position;
-			if ( !g_render->world_to_screen( unit_position, screen_position, camera_matrix ) )
-				continue;
-
-            const vec3_t local_position = sdk::cLocalPlayer->getLocalUnit( ).getPosition( );
-            const float distance = local_position.dist_to( unit_position );
-            if ( distance >= 1250 )
+        // 遍历预计算的 unit 数据进行渲染
+        for ( const SImGuiUnit& unit : renderData.units )
+        {
+            if ( !unit.bValidEnemy )
                 continue;
 
-            const vec3_t bbmin = unit.getBBMin( );
-            const vec3_t bbmax = unit.getBBMax( );
-            const matrix3x4_t rotation = unit.getMatrixRotation( );
-            const auto world_corners = calculate_bbox_corners( unit_position, bbmin, bbmax, rotation );
+            if ( !unit.bOnScreen )
+                continue;
 
+            if ( unit.distance >= 1250.0f )
+                continue;
+
+            // 使用预计算的屏幕坐标绘制 3D 框
+            // 将预计算的 SImGuiVert 数组转为 vec2_t 数组
             std::array< vec2_t, 8 > screen_corners;
             bool all_corners_visible = true;
 
-            for ( size_t i = 0; i < world_corners.size( ); ++i ) 
+            for ( size_t i = 0; i < unit.screenBoxVerts.size( ); ++i )
             {
-                if ( !g_render->world_to_screen( world_corners[ i ], screen_corners[ i ], camera_matrix ) )
+                if ( !unit.screenBoxVerts[ i ].bOnScreen )
                 {
                     all_corners_visible = false;
                     break;
                 }
+                screen_corners[ i ] = unit.screenBoxVerts[ i ].origin;
             }
 
-            float box_bottom_y = 0.0f;
-            float box_top_y = 0.0f;
-            float box_right_x = 0.0f;
-            
-            if ( all_corners_visible ) 
+            if ( all_corners_visible )
             {
-                draw_wireframe_box( screen_corners, IM_COL32( 255, 0, 0, 255 ), 1.0f);
+                draw_wireframe_box( screen_corners, IM_COL32( 255, 0, 0, 255 ), 1.0f );
+            }
 
-                box_bottom_y = screen_corners[ 0 ].y;
-                box_top_y = screen_corners[ 0 ].y;
-                box_right_x = screen_corners[ 0 ].x;
-                
-                for ( size_t i = 1; i < screen_corners.size( ); ++i ) 
+            // aimbot 绘制（使用预计算的瞄准点）
+            if ( misc::bAimbotEnabled && unit.bHasAimPoint )
+            {
+                vec2_t aimScreen;
+                if ( g_render->world_to_screen( unit.aimPoint, aimScreen, camera_matrix ) )
                 {
-                    box_bottom_y    = max( box_bottom_y, screen_corners[ i ].y );
-                    box_top_y       = min( box_top_y, screen_corners[ i ].y );
-                    box_right_x     = max( box_right_x, screen_corners[ i ].x );
+                    g_render->rect( aimScreen.x - 2, aimScreen.y - 2, 4, 4, IM_COL32( 255, 255, 0, 150 ), 4.0f );
+
+                    // 从目标到瞄准点画线
+                    g_render->line( unit.screenOrigin.x, unit.screenOrigin.y, aimScreen.x, aimScreen.y, IM_COL32( 255, 0, 0, 200 ), 2.0f );
                 }
-
-                //const std::string vehicle_name = unit.getInfo( ).getVehicleName( );
-                //if ( !vehicle_name.empty( ) )
-                //{
-                //    const vec2_t name_position = {
-                //        screen_position.x,
-                //        box_bottom_y + 35.0f
-                //    };
-
-                //    g_render->text( name_position, IM_COL32( 255, 255, 0, 255 ), 0, vehicle_name, g_render->fonts( ).m_esp );
-                //}
             }
-
-            /*if ( box_bottom_y > 0.0f ) 
-            {
-                char distance_text[ 16 ];
-                float distance_km = distance / 1000.0f;
-                snprintf( distance_text, sizeof( distance_text ), "%.1fkm", distance );
-
-                const vec2_t text_position = {
-                    screen_position.x,
-                    box_bottom_y + 5.0f
-                };
-
-                g_render->text( text_position, IM_COL32( 255, 255, 255, 255 ), 0, distance_text, g_render->fonts( ).m_esp );
-
-                uint8_t reload_time = unit.getReloadTime( );
-                char reload_text[ 16 ];
-                constexpr float stat = ( 10.f / 16 );
-                float progress = stat * reload_time * 0.1f;
-
-                snprintf( reload_text, sizeof( reload_text ), "%.1fs", progress );
-
-                const vec2_t reload_pos = {
-                    screen_position.x,
-                    box_bottom_y + 20.0f
-                };
-            
-                g_render->text( reload_pos, IM_COL32( 0, 200, 255, 255 ), 0, reload_text, g_render->fonts( ).m_esp );
-            }*/
-
-            //aimbot::run( unit, unit_position, local_position, camera_matrix );
-
-		}
-	}
+        }
+    }
 }

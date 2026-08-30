@@ -7,6 +7,11 @@ public:
 		return this->base_address != 0;
 	}
 
+	// 重新初始化：在非存活/非观战状态时调用
+	auto reinit( ) -> bool {
+		return init( );
+	}
+
 public:
 
     auto getGuiState( ) -> uint8_t {

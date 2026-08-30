@@ -14,16 +14,8 @@ namespace aimbot
         float max_dist = 0.0f;
     };
 
-    inline BallisticsData ballisticsData;
-
-    inline auto GetBallisticsInfo() -> void
-    {
-        ballisticsData.mass = sdk::cGame->ballistics->getMass();
-        ballisticsData.caliber = sdk::cGame->ballistics->getCaliber();
-        ballisticsData.velocity = sdk::cGame->ballistics->getVelocity();
-        ballisticsData.length = sdk::cGame->ballistics->getLength();
-        ballisticsData.max_dist = sdk::cGame->ballistics->getMaxDistance();
-    }
+    // 弹道数据现在在 misc.hpp 的 GameUpdate 中预缓存到 SGameData
+    // 渲染线程不再直接调用 GetBallisticsInfo()
 
     class BallisticsPrediction {
     private:
@@ -258,47 +250,12 @@ namespace aimbot
         }
     };
 
+    // run() 函数已移至 misc.hpp 的 GameUpdate 中预计算
+    // 渲染线程在 esp::run() 中直接使用预计算的 aimPoint 绘制
+    // 以下是保留的旧接口（已被预计算逻辑替代）
+    /*
     inline auto run( c_unit& unit, vec3_t unit_position, vec3_t local_position, matrix4x4_t camera_matrix ) -> void {
-
-        if ( sdk::cLocalPlayer->getGuiState( ) != GuiState::ALIVE )
-            return;
-
-        static BallisticsPrediction pred;
-
-        float horizontalDist = std::sqrt(
-            ( unit_position.x - local_position.x ) * ( unit_position.x - local_position.x ) +
-            ( unit_position.z - local_position.z ) * ( unit_position.z - local_position.z )
-        );
-
-        float distanceFactor = horizontalDist / 150.0f;
-        float extraOffset = distanceFactor * 0.146f;
-
-        unit_position.y += 1.0f + extraOffset;
-
-        GetBallisticsInfo( );
-
-        // Get target velocity (you'll need to implement this)
-        vec3_t targetVelocity = unit.get_movement_ground( ).velocity( ); // Implement this method
-
-        // Calculate predicted intercept point
-        vec3_t aimPoint;
-        if ( targetVelocity.length() > 0.1f ) {
-            // Moving target - use full prediction
-            aimPoint = pred.PredictInterceptPoint( local_position, unit_position, targetVelocity, ballisticsData );
-        }
-        else 
-            aimPoint = pred.GetAimPoint( local_position, unit_position, ballisticsData );
-            
-        vec2_t screen;
-        if ( !g_render->world_to_screen( aimPoint, screen, camera_matrix ) )
-            return;
-
-        g_render->rect( screen.x - 2, screen.y - 2, 4, 4, IM_COL32( 255, 255, 0, 150 ), 4.0f );
-
-        vec2_t unitScreen;
-        if ( g_render->world_to_screen( unit_position, unitScreen, camera_matrix ) )
-            g_render->line( unitScreen.x, unitScreen.y, screen.x, screen.y, IM_COL32( 255, 0, 0, 200 ), 2.0f );
-            
-        
+        ...
     }
+    */
 }
