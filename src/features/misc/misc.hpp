@@ -1,5 +1,9 @@
 #pragma once
 
+#include <mutex>
+#include <array>
+#include <vector>
+
 #include "..\..\game\datatypes\game_data.hpp"
 #include "..\..\game\datatypes\matrix.hpp"
 #include "..\..\game\datatypes\vector3.hpp"

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <mutex>
+#include <array>
+
 #include "..\..\game\datatypes\game_data.hpp"
 #include "..\..\game\datatypes\matrix.hpp"
 #include "..\..\game\datatypes\vector3.hpp"
@@ -100,7 +103,7 @@ namespace esp
         {
             vec2_t screen_position;
             if ( g_render->world_to_screen( renderData.bombImpactPoint, screen_position, camera_matrix ) )
-                g_render->circle( screen_position.x, screen_position.y, 6.0f, IM_COL32( 255, 0, 200, 255 ), 16.0f );
+                g_render->circle( screen_position.x, screen_position.y, 6.0f, IM_COL32( 255, 0, 200, 255 ), 16 );
         }
 
         // 遍历预计算的 unit 数据进行渲染
