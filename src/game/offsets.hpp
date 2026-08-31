@@ -1,31 +1,76 @@
 #pragma once
 
-// https://www.unknowncheats.me/forum/4121914-post1797.html
+#include <cstdint>
+
+// War Thunder 2.57.1.122 offsets - dumped from WT/OPS (monkrel.cc)
 namespace offsets
 {
-	inline uintptr_t cgame_offset = 0;
-	inline uintptr_t localplayer_offset = 0;
-	inline uintptr_t view_angles = 0x6E83BB8;
+	// Global offsets (from module base)
+	namespace globals
+	{
+		// g_GameContext -> c_game pointer (was cgame_offset)
+		constexpr uintptr_t game_context = 0x7169DF8;
+		// g_LocalPlayer -> local player entity (was localplayer_offset)
+		constexpr uintptr_t local_player = 0x7142B80;
+		// g_MyUnit -> local player's current unit
+		constexpr uintptr_t my_unit = 0x716B9F8;
+		// g_ViewAngles
+		constexpr uintptr_t view_angles = 0x716E308;
+		// g_ViewMatrix
+		constexpr uintptr_t view_matrix = 0x71C3608;
+		// g_IsScoping
+		constexpr uintptr_t is_scoping = 0x71B2730;
+		// g_ScreenWidth
+		constexpr uintptr_t screen_width = 0x74D36A0;
+		// g_HudInfo
+		constexpr uintptr_t hud_info = 0x7169428;
+		// g_GameOptics
+		constexpr uintptr_t game_optics = 0x716B8C8;
+		// g_AirPredictionBool
+		constexpr uintptr_t air_prediction_bool = 0x74F4528;
+		// g_AllListData
+		constexpr uintptr_t all_list_data = 0x74CE708;
+		// g_BombListIndexPtr
+		constexpr uintptr_t bomb_list_index_ptr = 0x7146018;
+		// g_RocketListIndexPtr
+		constexpr uintptr_t rocket_list_index_ptr = 0x71474D0;
+		// g_UIPosArr
+		constexpr uintptr_t ui_pos_arr = 0x71B5968;
+	}
 
 	namespace cgame_offsets
 	{
 		constexpr uintptr_t ballistics_offset = 0x3F0;
 		constexpr uintptr_t camera_offset = 0x670;
+		constexpr uintptr_t current_map = 0x1F0;
+
+		// Unit lists (group 3 - active units)
+		constexpr uintptr_t unit_list_1 = 0x310;
+		constexpr uintptr_t unit_list_2 = 0x328;
+		constexpr uintptr_t unit_list_3 = 0x340;
+
+		constexpr uintptr_t unit_count_1 = 0x320;
+		constexpr uintptr_t unit_count_2 = 0x338;
+		constexpr uintptr_t unit_count_3 = 0x350;
+
 		namespace camera_offsets
 		{
-			constexpr uintptr_t camera_matrix_offset = 0x1D0;
-			constexpr uintptr_t camera_position_offset = 0x58;
+			constexpr uintptr_t camera_matrix_offset = 0x1D8;
+			constexpr uintptr_t camera_position_offset = 0x60;
 		}
+
 		namespace ballistic_offsets
 		{
-			constexpr uintptr_t selected_unit_ptr = 0x6B0;
+			constexpr uintptr_t bomb_impact_point = 0x1C9C;
+			// Bullet impact point - not in new dump, keeping old value
+			constexpr uintptr_t bullet_impact_point = 0x22C8 + 0x20;
+			// Ballistics data (velocity, mass, caliber, length, max_dist) - not in new dump, keeping old values
 			constexpr uintptr_t velocity = 0x2050;
 			constexpr uintptr_t mass = 0x205C;
 			constexpr uintptr_t caliber = 0x2060;
 			constexpr uintptr_t length = 0x2048;
 			constexpr uintptr_t max_dist = 0x2068;
-			constexpr uintptr_t bomb_impact_point = 0x1098;
-			constexpr uintptr_t bullet_impact_point = 0x22C8 + 0x20;
+			constexpr uintptr_t selected_unit_ptr = 0x6B0;
 			constexpr uintptr_t ballistics_ptr = 0x3f0;
 			constexpr uintptr_t ingame_ballistics = 0x2460;
 			constexpr uintptr_t weapon_position = 0x1F00;
@@ -36,7 +81,7 @@ namespace offsets
 				constexpr uintptr_t gameui_offset = 0x928;
 				namespace gameui_offsets
 				{
-					constexpr uintptr_t mouse_pos = 0x810; // vec3 cursor tank
+					constexpr uintptr_t mouse_pos = 0x810;
 				}
 			}
 		}
@@ -44,140 +89,51 @@ namespace offsets
 
 	namespace localplayer
 	{
-		constexpr uintptr_t Rerept_offset = 0x78;
-		constexpr uintptr_t brokenSlots_offset = 0x558;
-		constexpr uintptr_t cachedIsAutoSquad_offset = 0xc98;
-		constexpr uintptr_t clanTag_offset = 0x170;
-		constexpr uintptr_t classinessMark_offset = 0x5f8;
-		constexpr uintptr_t controlledUnitRef_offset = 0x8f0;
-		constexpr uintptr_t countryId_offset = 0x238;
-		constexpr uintptr_t customState_offset = 0x298;
-		constexpr uintptr_t decals_offset = 0x1e8;
-		constexpr uintptr_t disabledByMatchingSlots_offset = 0x528;
-		constexpr uintptr_t dummyForCountUsedSlots_offset = 0x730;
-		constexpr uintptr_t dummyForCrewUnitsList_offset = 0x4f8;
-		constexpr uintptr_t dummyForFootballStat_offset = 0xbf8;
-		constexpr uintptr_t dummyForKillStreaksProgress_offset = 0x810;
-		constexpr uintptr_t dummyForPlayerStat_offset = 0xbc8;
-		constexpr uintptr_t dummyForRoundScore_offset = 0xa38;
-		constexpr uintptr_t dummyForSpawnCosts_offset = 0x770;
-		constexpr uintptr_t dummyForSpawnDelayTimes_offset = 0x7b0;
-		constexpr uintptr_t dummyForSupportPlanes_offset = 0x428;
-		constexpr uintptr_t forceLockTarget_offset = 0xc70;
-		constexpr uintptr_t forcedRespawn_offset = 0x678;
 		constexpr uintptr_t guiState_offset = 0x6E0;
-		constexpr uintptr_t invitedNickName_offset = 0x120;
-		constexpr uintptr_t localunit_offset = 0x8E8;
-		constexpr uintptr_t memberId_offset = 0x260;
-		constexpr uintptr_t missionSupportUnitEnabled_offset = 0xd40;
-		constexpr uintptr_t missionSupportUnitRef_offset = 0xd10;
-		constexpr uintptr_t nickFrame_offset = 0xce8;
-		constexpr uintptr_t nickLocKey_offset = 0x148;
-		constexpr uintptr_t ownedSlots_offset = 0x5d0;
-		constexpr uintptr_t ownedUnitRef_offset = 0x8c0;
-		constexpr uintptr_t publicFlags_offset = 0x1c0;
-		constexpr uintptr_t rageTokens_offset = 0xd68;
-		constexpr uintptr_t realNick_offset = 0xc20;
-		constexpr uintptr_t roundAiGroundKills_offset = 0xb50;
-		constexpr uintptr_t roundAiKills_offset = 0xb28;
-		constexpr uintptr_t roundAiNavalKills_offset = 0xb78;
-		constexpr uintptr_t roundDeaths_offset = 0xab0;
-		constexpr uintptr_t roundFriendlyKills_offset = 0xa88;
-		constexpr uintptr_t roundGroundKills_offset = 0xad8;
-		constexpr uintptr_t roundKills_offset = 0xa60;
-		constexpr uintptr_t roundNavalKills_offset = 0xb00;
-		constexpr uintptr_t spareAircraftInSlots_offset = 0x5a8;
-		constexpr uintptr_t spectatedModelIndex_offset = 0x6f0;
-		constexpr uintptr_t squadScore_offset = 0x868;
-		constexpr uintptr_t squadronId_offset = 0xc48;
-		constexpr uintptr_t supportUnitRef_offset = 0x930;
-		constexpr uintptr_t timeToKick_offset = 0x6a0;
-		constexpr uintptr_t timeToRespawnInCoop_offset = 0x650;
-		constexpr uintptr_t timeToRespawn_offset = 0x628;
-		constexpr uintptr_t wasReadySlots_offset = 0x580;
-		constexpr uintptr_t wreckedPartShipUnitRef_offset = 0x960;
+		constexpr uintptr_t controlledUnit_offset = 0x918;
+		constexpr uintptr_t ownedUnit_offset = 0x8E8;
+		constexpr uintptr_t spectatedModelIndex_offset = 0x710;
+		constexpr uintptr_t name_offset = 0x60;
+		// Flags for isLocal check: (player+0x90 >> 9) & 1
+		constexpr uintptr_t publicFlags_offset = 0x90;
 	}
 
 	namespace unit_offsets
 	{
-
 		constexpr uintptr_t ground_velocity_offset = 0x5C;
 		constexpr uintptr_t airmovement_offset = 0x10;
-		constexpr uintptr_t allowBailout_offset = 0xa80;
-		constexpr uintptr_t bbmax_offset = 0x24C;
-		constexpr uintptr_t bbmin_offset = 0x240;
-		constexpr uintptr_t bombDelayExplosion_offset = 0x8e8;
-		constexpr uintptr_t briefMalfunctionState_offset = 0x8c0;
-		constexpr uintptr_t brokenPropFlags_offset = 0x2e98;
-		constexpr uintptr_t brokenTurretDriveJammedTime_offset = 0x600;
-		constexpr uintptr_t brokenTurretDriveMult_offset = 0x650;
-		constexpr uintptr_t brokenTurretDriveSpeed_offset = 0x628;
-		constexpr uintptr_t curNightVisionMode_offset = 0x710;
-		constexpr uintptr_t default_offset = 0x1b78;
-		constexpr uintptr_t delayWithFlightTime_offset = 0x910;
-		constexpr uintptr_t dummyForDeathInfo_offset = 0x998;
-		constexpr uintptr_t dummyForUnitFlags_offset = 0xcc8;
-		constexpr uintptr_t dummyVarForCrewLayout_offset = 0x740;
-		constexpr uintptr_t dummyVarForMissionAddText_offset = 0x768;
-		constexpr uintptr_t enableGunners_offset = 0xc68;
-		constexpr uintptr_t extThrustMult_offset = 0x3cc0;
-		constexpr uintptr_t extinguishAssistant_offset = 0xbc8;
-		constexpr uintptr_t extinguishAssistee_offset = 0xb98;
-		constexpr uintptr_t farthestExitZoneId_offset = 0xd70;
-		constexpr uintptr_t fuseModeIndex_offset = 0x16b8;
+		constexpr uintptr_t position_offset = 0xD28;
+		constexpr uintptr_t rotation_matrix_offset = 0xD04;
+		constexpr uintptr_t bbmax_offset = 0x25C;
+		constexpr uintptr_t bbmin_offset = 0x250;
+		constexpr uintptr_t body_bbmax_offset = 0x208C;
+		constexpr uintptr_t body_bbmin_offset = 0x2080;
+		constexpr uintptr_t unitState_offset = 0xF80;
+		constexpr uintptr_t teamNum_offset = 0x1000;
+		constexpr uintptr_t unitType_offset = 0x8C;
+		constexpr uintptr_t unitIndex_offset = 0x8;
+		constexpr uintptr_t unitFlags1_offset = 0x90;
+		constexpr uintptr_t unitFlags2_offset = 0x91;
+		constexpr uintptr_t unitFlags3_offset = 0x92;
+		constexpr uintptr_t unitFlags4_offset = 0x93;
+		constexpr uintptr_t visualReload_offset = 0xAD8;
+		constexpr uintptr_t info_offset = 0x1010;
+		constexpr uintptr_t invulnerable_offset = 0xE80;
+		constexpr uintptr_t invulTimer_offset = 0xE5C;
+		constexpr uintptr_t velocity_offset = 0x2000;
+		constexpr uintptr_t airContainer_offset = 0xD38;
+		constexpr uintptr_t armory_offset = 0x10B8;
+		constexpr uintptr_t damageModelCont_offset = 0x1090;
+		constexpr uintptr_t playerInfo_offset = 0xF88;
 		constexpr uintptr_t groundmovement_offset = 0x1F00;
-		constexpr uintptr_t hasModuleEffectsToRepair_offset = 0x6a0;
-		constexpr uintptr_t ignoreCollisionDamage_offset = 0x3d80;
-		constexpr uintptr_t info_offset = 0xdc0;
-		constexpr uintptr_t invulnerable_offset = 0xE60;
-		constexpr uintptr_t isAlternativeShotFreq_offset = 0x1c8;
-		constexpr uintptr_t isBreechDamaged_offset = 0x678;
-		constexpr uintptr_t isNeedExtinguishHelp_offset = 0x15d8;
-		constexpr uintptr_t isNeedRepairHelp_offset = 0x15a8;
-		constexpr uintptr_t isOnAirfieldAndCanRearmedVal_offset = 0x3560;
-		constexpr uintptr_t killer_offset = 0x14d8;
-		constexpr uintptr_t lastBuildingTime_offset = 0x870;
-		constexpr uintptr_t lastContactFrom_offset = 0x9d0;
-		constexpr uintptr_t lastContactTimeRel_offset = 0xa58;
-		constexpr uintptr_t lastContactTime_offset = 0xa30;
-		constexpr uintptr_t lastContactTo_offset = 0xa00;
-		constexpr uintptr_t lowRateUnitFlags_offset = 0xcf8;
-		constexpr uintptr_t maskingFactor_offset = 0x1658;
-		constexpr uintptr_t moduleEffectsRepairAtTime_offset = 0x6c8;
-		constexpr uintptr_t nextUseArtilleryTime_offset = 0x13c0;
-		constexpr uintptr_t persistentAerobaticsSmokeId_offset = 0x2e70;
-		constexpr uintptr_t persistentAerobaticsSmoke_offset = 0x2e48;
-		constexpr uintptr_t position_offset = 0xD08;
-		constexpr uintptr_t prepareExtinguishAssistantTime_offset = 0x1350;
-		constexpr uintptr_t prepareRepairAssistantTime_offset = 0x1328;
-		constexpr uintptr_t prepareRepairAssisteeTime_offset = 0x1300;
-		constexpr uintptr_t prepareRepairCooldownsTime_offset = 0x1478;
-		constexpr uintptr_t repairAssistant_offset = 0xb68;
-		constexpr uintptr_t repairAssistee_offset = 0xb38;
-		constexpr uintptr_t repairCooldowns_offset = 0x1608;
-		constexpr uintptr_t repairTimer_offset = 0x1a68;
-		constexpr uintptr_t rocketFuseDist_offset = 0x938;
-		constexpr uintptr_t rotation_matrix_offset = 0xCE4;
-		constexpr uintptr_t scoutCooldown_offset = 0xff0;
-		constexpr uintptr_t scoutStartTime_offset = 0xfc8;
-		constexpr uintptr_t smokeScreenActived_offset = 0x1758;
-		constexpr uintptr_t smokeScreenCount_offset = 0x1730;
-		constexpr uintptr_t stealthArmyMask_offset = 0xe38;
-		constexpr uintptr_t stealthRadiusSq_offset = 0xe10;
-		constexpr uintptr_t supportPlaneCatapultsFuseMask_offset = 0x838;
-		constexpr uintptr_t supportPlanesCount_offset = 0x810;
-		constexpr uintptr_t timeRepair_offset = 0x1a40;
-		constexpr uintptr_t timeToNextSmokeScreen_offset = 0x1708;
-		constexpr uintptr_t timeToRearm_offset = 0x1a90;
-		constexpr uintptr_t timeToRefuel_offset = 0x3ce8;
-		constexpr uintptr_t timeToSurrender_offset = 0x3d10;
-		constexpr uintptr_t torpedoDiveDepth_offset = 0x960;
-		constexpr uintptr_t turret_offset = 0xe68;
-		constexpr uintptr_t unitArmyNo_offset = 0xFE0;
-		constexpr uintptr_t unitState_offset = 0xF60;
-		constexpr uintptr_t visualReloadProgress_offset = 0x898;
-		constexpr uintptr_t vulnerableByUnitUId_offset = 0xc98;
-		constexpr uintptr_t wingBreakRnd_offset = 0x2ec0;
 	}
 
+	namespace unit_info_offsets
+	{
+		constexpr uintptr_t bomberView_offset = 0x454;
+		constexpr uintptr_t haveCCIPForBombs_offset = 0x459;
+		constexpr uintptr_t haveCCIPForGun_offset = 0x457;
+		constexpr uintptr_t haveCCIPForRocket_offset = 0x456;
+		constexpr uintptr_t haveCCIPForTurret_offset = 0x458;
+	}
 }

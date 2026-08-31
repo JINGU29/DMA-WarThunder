@@ -79,7 +79,7 @@ namespace esp
         draw_crosshair( );
 
         const auto gui_state = sdk::cLocalPlayer->getGuiState( );
-        if ( gui_state != GuiState::ALIVE && gui_state != GuiState::SPEC )
+        if ( gui_state != GuiState::ALIVE && gui_state != GuiState::SPECTATE && gui_state != GuiState::SPEC && gui_state != GuiState::BATTLE )
 			return;
 
         if ( sdk::cLocalPlayer->getLocalUnit( ).getInfo( ).isPlane( ) ) 
@@ -106,7 +106,7 @@ namespace esp
 
             const vec3_t local_position = sdk::cLocalPlayer->getLocalUnit( ).getPosition( );
             const float distance = local_position.dist_to( unit_position );
-            if ( distance >= 1250 )
+            if ( distance >= 2000 )
                 continue;
 
             const vec3_t bbmin = unit.getBBMin( );
@@ -115,53 +115,67 @@ namespace esp
             const auto world_corners = calculate_bbox_corners( unit_position, bbmin, bbmax, rotation );
 
             std::array< vec2_t, 8 > screen_corners;
-            bool all_corners_visible = true;
+            bool corners_visible[ 8 ] = {};
+            int visible_count = 0;
 
             for ( size_t i = 0; i < world_corners.size( ); ++i ) 
             {
-                if ( !g_render->world_to_screen( world_corners[ i ], screen_corners[ i ], camera_matrix ) )
+                if ( g_render->world_to_screen( world_corners[ i ], screen_corners[ i ], camera_matrix ) )
                 {
-                    all_corners_visible = false;
-                    break;
+                    corners_visible[ i ] = true;
+                    ++visible_count;
                 }
             }
 
-            float box_bottom_y = 0.0f;
-            float box_top_y = 0.0f;
-            float box_right_x = 0.0f;
-            
-            if ( all_corners_visible ) 
+            // 只要至少1个顶点可见就画框
+            if ( visible_count > 0 ) 
             {
-                draw_wireframe_box( screen_corners, IM_COL32( 255, 0, 0, 255 ), 1.0f);
+                // 用第一个可见顶点初始化边界
+                float box_bottom_y = 0.0f;
+                float box_top_y = 0.0f;
+                float box_right_x = 0.0f;
+                bool first = true;
 
-                box_bottom_y = screen_corners[ 0 ].y;
-                box_top_y = screen_corners[ 0 ].y;
-                box_right_x = screen_corners[ 0 ].x;
-                
-                for ( size_t i = 1; i < screen_corners.size( ); ++i ) 
+                for ( size_t i = 0; i < screen_corners.size( ); ++i )
                 {
-                    box_bottom_y    = max( box_bottom_y, screen_corners[ i ].y );
-                    box_top_y       = min( box_top_y, screen_corners[ i ].y );
-                    box_right_x     = max( box_right_x, screen_corners[ i ].x );
+                    if ( !corners_visible[ i ] )
+                        continue;
+
+                    if ( first )
+                    {
+                        box_bottom_y = screen_corners[ i ].y;
+                        box_top_y    = screen_corners[ i ].y;
+                        box_right_x  = screen_corners[ i ].x;
+                        first = false;
+                    }
+                    else
+                    {
+                        box_bottom_y = max( box_bottom_y, screen_corners[ i ].y );
+                        box_top_y    = min( box_top_y,    screen_corners[ i ].y );
+                        box_right_x  = max( box_right_x,  screen_corners[ i ].x );
+                    }
                 }
 
-                //const std::string vehicle_name = unit.getInfo( ).getVehicleName( );
-                //if ( !vehicle_name.empty( ) )
-                //{
-                //    const vec2_t name_position = {
-                //        screen_position.x,
-                //        box_bottom_y + 35.0f
-                //    };
+                // 只画可见顶点之间的线框边
+                // 底面四条边
+                if ( corners_visible[0] && corners_visible[1] ) g_render->line( screen_corners[0].x, screen_corners[0].y, screen_corners[1].x, screen_corners[1].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[1] && corners_visible[3] ) g_render->line( screen_corners[1].x, screen_corners[1].y, screen_corners[3].x, screen_corners[3].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[3] && corners_visible[2] ) g_render->line( screen_corners[3].x, screen_corners[3].y, screen_corners[2].x, screen_corners[2].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[2] && corners_visible[0] ) g_render->line( screen_corners[2].x, screen_corners[2].y, screen_corners[0].x, screen_corners[0].y, IM_COL32(255,0,0,255), 1.0f );
+                // 顶面四条边
+                if ( corners_visible[4] && corners_visible[5] ) g_render->line( screen_corners[4].x, screen_corners[4].y, screen_corners[5].x, screen_corners[5].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[5] && corners_visible[7] ) g_render->line( screen_corners[5].x, screen_corners[5].y, screen_corners[7].x, screen_corners[7].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[7] && corners_visible[6] ) g_render->line( screen_corners[7].x, screen_corners[7].y, screen_corners[6].x, screen_corners[6].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[6] && corners_visible[4] ) g_render->line( screen_corners[6].x, screen_corners[6].y, screen_corners[4].x, screen_corners[4].y, IM_COL32(255,0,0,255), 1.0f );
+                // 四条竖边
+                if ( corners_visible[0] && corners_visible[4] ) g_render->line( screen_corners[0].x, screen_corners[0].y, screen_corners[4].x, screen_corners[4].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[1] && corners_visible[5] ) g_render->line( screen_corners[1].x, screen_corners[1].y, screen_corners[5].x, screen_corners[5].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[2] && corners_visible[6] ) g_render->line( screen_corners[2].x, screen_corners[2].y, screen_corners[6].x, screen_corners[6].y, IM_COL32(255,0,0,255), 1.0f );
+                if ( corners_visible[3] && corners_visible[7] ) g_render->line( screen_corners[3].x, screen_corners[3].y, screen_corners[7].x, screen_corners[7].y, IM_COL32(255,0,0,255), 1.0f );
 
-                //    g_render->text( name_position, IM_COL32( 255, 255, 0, 255 ), 0, vehicle_name, g_render->fonts( ).m_esp );
-                //}
-            }
-
-            /*if ( box_bottom_y > 0.0f ) 
-            {
+                // Distance + reload time display
                 char distance_text[ 16 ];
-                float distance_km = distance / 1000.0f;
-                snprintf( distance_text, sizeof( distance_text ), "%.1fkm", distance );
+                snprintf( distance_text, sizeof( distance_text ), "%dm", static_cast<int>(distance) );
 
                 const vec2_t text_position = {
                     screen_position.x,
@@ -181,9 +195,9 @@ namespace esp
                     screen_position.x,
                     box_bottom_y + 20.0f
                 };
-            
+
                 g_render->text( reload_pos, IM_COL32( 0, 200, 255, 255 ), 0, reload_text, g_render->fonts( ).m_esp );
-            }*/
+            }
 
             //aimbot::run( unit, unit_position, local_position, camera_matrix );
 

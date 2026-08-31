@@ -3,7 +3,7 @@
 class c_entity {
 public:
 	auto init( ) -> bool {
-		this->base_address = TargetProcess->Read< uintptr_t >( baseAddr + offsets::localplayer_offset );
+		this->base_address = TargetProcess->Read< uintptr_t >( baseAddr + offsets::globals::local_player );
 		return this->base_address != 0;
 	}
 
@@ -14,8 +14,8 @@ public:
 	}
 
 	auto getLocalUnit( ) -> c_unit {
-		uintptr_t addr = TargetProcess->Read< uintptr_t >( this->base_address + offsets::localplayer::localunit_offset );
-		return c_unit( addr - 1 );
+		uintptr_t addr = TargetProcess->Read< uintptr_t >( baseAddr + offsets::globals::my_unit );
+		return c_unit( addr );
 	}
 
 private:

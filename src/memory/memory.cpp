@@ -99,9 +99,7 @@ bool c_memory::SetFPGA()
 		return false;
 	}
 
-	LOG("[+] VMMDLL_ConfigGet");
-	LOG(" ID = %lli", qwID);
-	LOG(" VERSION = %lli.%lli\n", qwVersionMajor, qwVersionMinor);
+	LOG("[+] VMMDLL_ConfigGet ID = %lli VERSION = %lli.%lli\n", qwID, qwVersionMajor, qwVersionMinor);
 
 	if ((qwVersionMajor >= 4) && ((qwVersionMajor >= 5) || (qwVersionMinor >= 7)))
 	{

@@ -17,6 +17,9 @@ LRESULT WINAPI WndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 
 int main( int, char** )
 {
+    // Initialize log system - crash handler + atexit dump
+    init_log_system( );
+
     // Make process DPI aware and obtain main monitor scale
     ImGui_ImplWin32_EnableDpiAwareness( );
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor( ::MonitorFromPoint( POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY ) );
@@ -89,7 +92,10 @@ int main( int, char** )
 
     // hack init
     if ( !core::Thread( ) )
+    {
+        dump_log_to_file( );
         return FALSE;
+    }
 
     // Main loop
     bool done = false;
@@ -156,6 +162,15 @@ int main( int, char** )
         HRESULT hr = g_pSwapChain->Present( 1, 0 );   // Present with vsync
         //HRESULT hr = g_pSwapChain->Present( 0, 0 ); // Present without vsync
         g_SwapChainOccluded = ( hr == DXGI_STATUS_OCCLUDED );
+
+        // Periodically dump log to file (every ~5 seconds)
+        static auto last_dump = std::chrono::steady_clock::now( );
+        auto now = std::chrono::steady_clock::now( );
+        if ( std::chrono::duration_cast< std::chrono::seconds >( now - last_dump ).count( ) >= 5 )
+        {
+            dump_log_to_file( );
+            last_dump = now;
+        }
     }
 
     // Cleanup
@@ -166,6 +181,9 @@ int main( int, char** )
     CleanupDeviceD3D( );
     ::DestroyWindow( hwnd );
     ::UnregisterClassW( wc.lpszClassName, wc.hInstance );
+
+    // Dump log to file on exit
+    dump_log_to_file( );
 
     return FALSE;
 }

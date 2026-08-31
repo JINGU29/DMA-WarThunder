@@ -45,7 +45,7 @@ public:
 	}
 
 	auto getInvulnerable( ) -> uintptr_t {
-		return TargetProcess->Read< uintptr_t >( this->base_address + 0x0C40 );
+		return TargetProcess->Read< uintptr_t >( this->base_address + offsets::unit_offsets::invulnerable_offset );
 	}
 
 	auto getUnitState( ) -> uint16_t {
@@ -53,11 +53,11 @@ public:
 	}
 
 	auto getTeam( ) -> uint8_t {
-		return TargetProcess->Read< uint8_t >( this->base_address + offsets::unit_offsets::unitArmyNo_offset );
+		return TargetProcess->Read< uint8_t >( this->base_address + offsets::unit_offsets::teamNum_offset );
 	}
 
 	auto getReloadTime( ) -> uint8_t {
-		return TargetProcess->Read< uint8_t >( this->base_address + offsets::unit_offsets::visualReloadProgress_offset );
+		return TargetProcess->Read< uint8_t >( this->base_address + offsets::unit_offsets::visualReload_offset );
 	}
 
 private:

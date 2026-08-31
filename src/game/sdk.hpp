@@ -25,7 +25,9 @@ enum GuiState : std::uint8_t {
 	MENU = 1,
 	ALIVE = 2,
 	DEAD = 3,
+	SPECTATE = 4,	// spectating other players
 	SPEC = 6,
+	BATTLE = 7,	// in-battle gameplay state
 	SPAWN_MENU = 8,
 	LOADING = 10
 };

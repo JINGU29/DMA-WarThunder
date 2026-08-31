@@ -22,14 +22,48 @@ namespace misc
 		std::vector< c_unit > temp_units;
 
 		const auto gui_state = sdk::cLocalPlayer->getGuiState( );
-		if ( gui_state != GuiState::ALIVE && gui_state != GuiState::SPEC ) {
+
+		// debug log for all states (throttled to 5s)
+		static auto last_debug_log = std::chrono::steady_clock::now( );
+		auto now = std::chrono::steady_clock::now( );
+		static uint8_t last_state = 0xFF;
+		bool state_changed = ( gui_state != last_state );
+		last_state = gui_state;
+
+		if ( gui_state != GuiState::ALIVE && gui_state != GuiState::SPECTATE && gui_state != GuiState::SPEC && gui_state != GuiState::BATTLE )
+		{
+			if ( state_changed || std::chrono::duration_cast< std::chrono::seconds >( now - last_debug_log ).count( ) >= 5 )
+			{
+				const char* state_str = "UNKNOWN";
+				switch ( gui_state )
+				{
+					case GuiState::NONE:        state_str = "NONE(lobby)"; break;
+					case GuiState::MENU:        state_str = "MENU"; break;
+					case GuiState::LOADING:     state_str = "LOADING"; break;
+					case GuiState::SPAWN_MENU:  state_str = "SPAWN_MENU"; break;
+					case GuiState::DEAD:        state_str = "DEAD"; break;
+					case GuiState::SPECTATE:    state_str = "SPECTATE"; break;
+					case GuiState::BATTLE:      state_str = "BATTLE"; break;
+					default: break;
+				}
+				LOG( "Waiting for battle... state: %s (gui_state=%d)\n", state_str, gui_state );
+				last_debug_log = now;
+			}
+
 			sdk::cLocalPlayer->init( );
 			unitsList.clear( );
 			return;
 		}
 
+		// entered battle - log once on state change
+		if ( state_changed )
+		{
+			LOG( "Entered battle! (gui_state=%d)\n", gui_state );
+			last_debug_log = now;
+		}
+
 		const int unit_count = sdk::cGame->getUnitCount( );
-		if ( !unit_count ) {
+		if ( !unit_count || unit_count > 10000 ) {
 			unitsList.clear( );
 			return;
 		}
@@ -53,8 +87,10 @@ namespace misc
 			
 			TargetProcess->ExecuteReadScatter( handle );
 
-			for ( size_t i = 0; i < count; i++ )
-				result.emplace_back( c_unit( pointers.at( i ) ) );
+			for ( size_t i = 0; i < count; i++ ) {
+				if ( pointers.at( i ) )
+					result.emplace_back( c_unit( pointers.at( i ) ) );
+			}
 
 			return result;
 		};
@@ -62,7 +98,7 @@ namespace misc
 		std::vector< c_unit > units = scatter_unit( hScatter, unit_count );
 		for ( c_unit unit : units ) 
 		{
-			if ( is_valid_enemy( unit ) )
+			if ( unit.get_base( ) && is_valid_enemy( unit ) )
 				temp_units.emplace_back( unit );
 
 		}

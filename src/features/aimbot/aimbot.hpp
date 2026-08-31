@@ -260,45 +260,63 @@ namespace aimbot
 
     inline auto run( c_unit& unit, vec3_t unit_position, vec3_t local_position, matrix4x4_t camera_matrix ) -> void {
 
-        if ( sdk::cLocalPlayer->getGuiState( ) != GuiState::ALIVE )
+        if ( auto gs = sdk::cLocalPlayer->getGuiState( ); gs != GuiState::ALIVE && gs != GuiState::SPECTATE && gs != GuiState::BATTLE )
             return;
 
-        static BallisticsPrediction pred;
+        static constexpr float GRAVITY = 9.81f;
+        static constexpr float ASSUMED_MUZZLE_VELOCITY = 850.0f; // reasonable default for most guns
 
         float horizontalDist = std::sqrt(
             ( unit_position.x - local_position.x ) * ( unit_position.x - local_position.x ) +
             ( unit_position.z - local_position.z ) * ( unit_position.z - local_position.z )
         );
 
+        // skip if too far
+        if ( horizontalDist > 3000.0f )
+            return;
+
         float distanceFactor = horizontalDist / 150.0f;
         float extraOffset = distanceFactor * 0.146f;
 
         unit_position.y += 1.0f + extraOffset;
 
-        GetBallisticsInfo( );
+        // Get target velocity
+        vec3_t targetVelocity = unit.get_movement_ground( ).velocity( );
 
-        // Get target velocity (you'll need to implement this)
-        vec3_t targetVelocity = unit.get_movement_ground( ).velocity( ); // Implement this method
+        // Simplified prediction: estimate flight time and predict target position
+        float distance = local_position.dist_to( unit_position );
+        float flightTime = distance / ASSUMED_MUZZLE_VELOCITY;
 
-        // Calculate predicted intercept point
-        vec3_t aimPoint;
-        if ( targetVelocity.length() > 0.1f ) {
-            // Moving target - use full prediction
-            aimPoint = pred.PredictInterceptPoint( local_position, unit_position, targetVelocity, ballisticsData );
+        // Predict where target will be after flight time
+        vec3_t aimPoint = unit_position + targetVelocity * flightTime;
+
+        // Add gravity drop compensation
+        float drop = 0.5f * GRAVITY * flightTime * flightTime;
+        aimPoint.y += drop;
+
+        // debug log
+        static auto last_log = std::chrono::steady_clock::now( );
+        auto now = std::chrono::steady_clock::now( );
+        if ( std::chrono::duration_cast< std::chrono::seconds >( now - last_log ).count( ) >= 5 )
+        {
+            LOG( "Aimbot: dist=%.1f flightTime=%.3f drop=%.1f targetVel=%.1f aim=(%.1f, %.1f, %.1f)\n",
+                 horizontalDist, flightTime, drop, targetVelocity.length( ),
+                 aimPoint.x, aimPoint.y, aimPoint.z );
+            last_log = now;
         }
-        else 
-            aimPoint = pred.GetAimPoint( local_position, unit_position, ballisticsData );
-            
+
         vec2_t screen;
         if ( !g_render->world_to_screen( aimPoint, screen, camera_matrix ) )
             return;
 
-        g_render->rect( screen.x - 2, screen.y - 2, 4, 4, IM_COL32( 255, 255, 0, 150 ), 4.0f );
+        // yellow square marker at predicted hit point
+        g_render->rect( screen.x - 4, screen.y - 4, 8, 8, IM_COL32( 255, 255, 0, 200 ), 2.0f );
+        g_render->filled_rect( screen.x - 2, screen.y - 2, 4, 4, IM_COL32( 255, 255, 0, 150 ), 0, 0 );
 
+        // red line from target to predicted hit point
         vec2_t unitScreen;
         if ( g_render->world_to_screen( unit_position, unitScreen, camera_matrix ) )
             g_render->line( unitScreen.x, unitScreen.y, screen.x, screen.y, IM_COL32( 255, 0, 0, 200 ), 2.0f );
-            
-        
+
     }
 }

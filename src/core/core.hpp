@@ -21,21 +21,27 @@ namespace core
             return false;
         }
 
-        update::parse_offsets( );
-
+        LOG( "Initializing SDK...\n" );
         if ( !sdk::init( ) )
         {
             LOG( "Failed to initialize sdk.\n" );
             return false;
         }
+        LOG( "SDK initialized successfully!\n" );
 
 		std::thread( [ & ]( ) 
         {
         
             while ( true ) 
             {
-
-                misc::UpdateEntityList( );
+                try
+                {
+                    misc::UpdateEntityList( );
+                }
+                catch ( ... )
+                {
+                    // prevent crash from killing the thread
+                }
 
                 std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
             }
