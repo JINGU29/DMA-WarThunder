@@ -144,6 +144,72 @@ int main( int, char** )
 
         esp::run( );
 
+        // Debug Info 覆盖层
+        {
+            const ImGuiIO& io = ImGui::GetIO();
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs
+                | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings
+                | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+
+            ImGui::SetNextWindowBgAlpha(0.65f);
+            ImGui::Begin("Debug Info", nullptr, flags);
+            ImGui::SetWindowPos(ImVec2(10, 10), ImGuiCond_Always);
+
+            ImGui::Text("FPS: %.1f", io.Framerate);
+            ImGui::Text("Frame: %.2f ms", 1000.0f / io.Framerate);
+
+            // 从共享数据读取调试信息
+            SGameData debugData;
+            {
+                std::lock_guard<std::mutex> lock(misc::g_gameMutex);
+                debugData = misc::g_gameData;
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Valid: %s", debugData.bIsValid ? "YES" : "NO");
+            ImGui::Text("Units: %d", (int)debugData.units.size());
+
+            // GUI 状态
+            const auto gui_state = sdk::cLocalPlayer->getGuiState();
+            const char* state_str = "UNKNOWN";
+            switch (gui_state)
+            {
+                case GuiState::NONE:        state_str = "NONE(lobby)"; break;
+                case GuiState::MENU:        state_str = "MENU"; break;
+                case GuiState::ALIVE:       state_str = "ALIVE"; break;
+                case GuiState::DEAD:        state_str = "DEAD"; break;
+                case GuiState::SPECTATE:    state_str = "SPECTATE"; break;
+                case GuiState::SPEC:        state_str = "SPEC"; break;
+                case GuiState::BATTLE:      state_str = "BATTLE"; break;
+                case GuiState::SPAWN_MENU:  state_str = "SPAWN_MENU"; break;
+                case GuiState::LOADING:     state_str = "LOADING"; break;
+                default: break;
+            }
+            ImGui::Text("State: %s (%d)", state_str, gui_state);
+
+            if (debugData.bIsValid)
+            {
+                ImGui::Separator();
+                ImGui::Text("LocalPos: (%.0f, %.0f, %.0f)",
+                    debugData.localPosition.x, debugData.localPosition.y, debugData.localPosition.z);
+                ImGui::Text("IsPlane: %s", debugData.bLocalIsPlane ? "YES" : "NO");
+
+                if (debugData.bHasBombImpact)
+                {
+                    ImGui::Text("BombImpact: (%.0f, %.0f, %.0f)",
+                        debugData.bombImpactPoint.x, debugData.bombImpactPoint.y, debugData.bombImpactPoint.z);
+                }
+
+                // 弹道数据（已移除，偏移量过时全为0）
+
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Aimbot: %s", misc::bAimbotEnabled ? "ON" : "OFF");
+
+            ImGui::End();
+        }
+
         // Rendering
         ImGui::Render( );
         const float clear_color_with_alpha[ 4 ] = { 0, 0, 0, 0 };
