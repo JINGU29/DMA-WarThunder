@@ -64,9 +64,6 @@ namespace esp
             if ( !unit.bValidEnemy )
                 continue;
 
-            if ( unit.distance >= 1250.0f )
-                continue;
-
             // 对预计算的世界顶点做 world_to_screen（使用最新视角矩阵）
             std::array<vec2_t, 8> screen_corners;
             bool corners_visible[8] = {};
