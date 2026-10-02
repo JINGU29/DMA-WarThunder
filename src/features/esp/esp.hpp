@@ -136,6 +136,16 @@ namespace esp
                 vec2_t unit_screen;
                 g_render->world_to_screen( unit.worldOrigin, unit_screen, camera_matrix );
 
+                // 载具名字显示（青色带描边，显示在框顶部上方）
+                if ( !unit.vehicleName.empty( ) )
+                {
+                    const vec2_t name_pos = {
+                        unit_screen.x,
+                        box_top_y - 20.0f
+                    };
+                    g_render->text( name_pos, IM_COL32( 0, 255, 255, 255 ), outline, unit.vehicleName, g_render->fonts( ).m_esp );
+                }
+
                 const vec2_t text_position = {
                     unit_screen.x,
                     box_bottom_y + 5.0f

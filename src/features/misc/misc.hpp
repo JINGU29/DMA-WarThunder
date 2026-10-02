@@ -256,6 +256,30 @@ namespace misc
 
 			SImGuiUnit unit;
 			unit.unitAddr = validUnits[i];
+
+			// 读取载具名字：unit + info_offset(0x1010) -> info + 0x28 -> ReadString
+			// 字符串需要两步间接寻址，无法通过 scatter read 批量读取，单独读取
+			{
+				uintptr_t infoAddr = TargetProcess->Read<uintptr_t>( validUnits[i] + offsets::unit_offsets::info_offset );
+				if ( infoAddr )
+				{
+					uintptr_t nameAddr = TargetProcess->Read<uintptr_t>( infoAddr + 0x28 );
+					if ( nameAddr )
+					{
+						unit.vehicleName = TargetProcess->ReadString( nameAddr );
+
+						// 过滤 UTF-8 零宽空格 (U+200B = E2 80 8B)
+						// War Thunder 在中文字符间插入零宽空格，ImGui 会渲染为问号/方块
+						{
+							const std::string zwsp = std::string( "\xE2\x80\x8B", 3 );
+							size_t pos = 0;
+							while ( ( pos = unit.vehicleName.find( zwsp, pos ) ) != std::string::npos )
+								unit.vehicleName.erase( pos, 3 );
+						}
+					}
+				}
+			}
+
 			unit.worldOrigin = buffers[i].position;
 			unit.worldBounds = AABB( buffers[i].bbmin, buffers[i].bbmax );
 			unit.rotation = buffers[i].rotation;

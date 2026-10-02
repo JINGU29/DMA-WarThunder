@@ -1,0 +1,13 @@
+# 忽略不影响编译的 linter 误报
+# 这些错误是 IDE 的 intellisense/clangd 缺少 MSBuild 编译上下文导致的
+# 项目在 MSBuild 编译时完全正常，以下 linter 错误均为误报：
+#
+# - TargetProcess / baseAddr / baseSize: 全局变量在 memory.h / includes.hpp 中定义
+# - IM_COL32 / ImU32: ImGui 宏和类型，在 imgui.h 中定义
+# - VMMDLL_SCATTER_HANDLE / VMM_HANDLE / NTSTATUS: DMA-SDK 类型，在 vmmdll.h 中定义
+# - SM_CXSCREEN / SM_CYSCREEN: Windows API 常量，在 Windows.h 中定义
+# - LOG: 项目自定义宏，在 includes.hpp 中定义
+# - c_movement_air / c_ballistic: 游戏类，在 movement.hpp / ballistic.hpp 中定义
+# - max / min: 来自 <algorithm>，受 NOMINMAX 保护
+# - string_view: C++23 标准库特性，MSBuild 编译正常
+# - Inline variables: 项目使用 stdcpplatest (C++23)，inline 变量合法

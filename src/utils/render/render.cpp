@@ -1,15 +1,55 @@
 #include "..\..\includes.hpp"
 
 void c_render::init( ) {
-    ImGui::CreateContext( );
+    // 注意：ImGui::CreateContext() 已在 main.cpp 中调用，此处不再重复创建
+    // 重复创建会销毁已有上下文，导致 ImGui_ImplDX11_Init 注册的纹理失效，文字渲染乱码
 
     auto& io = ImGui::GetIO( );
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
-    m_fonts.m_esp = io.Fonts->AddFontFromFileTTF( "C:\\Windows\\Fonts\\Verdana.ttf", 16.0f );
-    
+    // 加载支持中文的字体，指定中文 glyph ranges 避免乱码
+    // 字体文件放在 %APPDATA%\war-thunder-data\font\ 目录下，便于统一管理
+    static const ImWchar glyph_ranges[] = {
+        0x0020, 0x00FF,   // 基本拉丁字符 + 拉丁补充
+        0x2000, 0x206F,   // 通用标点
+        0x3000, 0x30FF,   // CJK 标点 + 日文假名
+        0x31F0, 0x31FF,   // 日文假名扩展
+        0x3400, 0x4DBF,   // CJK 扩展 A
+        0x4E00, 0x9FFF,   // CJK 统一汉字（中文核心范围）
+        0xFF00, 0xFFEF,   // 全角字符
+        0x0000, 0x0000,   // 结束标记
+    };
+
+    ImFontConfig font_cfg;
+    font_cfg.OversampleH = 2;
+    font_cfg.OversampleV = 1;
+
+    // 构建 font 目录路径并自动创建
+    std::string font_dir = get_app_data_dir( ) + "font\\";
+    CreateDirectoryA( font_dir.c_str( ), nullptr );
+
+    // 从 font 目录加载 Noto Serif CJK 字体（SemiBold 半粗体，字号 20）
+    std::string font_path = font_dir + "NotoSerifCJKsc-SemiBold.otf";
+    m_fonts.m_esp = io.Fonts->AddFontFromFileTTF(
+        font_path.c_str( ),
+        20.0f,
+        &font_cfg,
+        glyph_ranges
+    );
+
+    // 如果指定字体加载失败，回退到系统微软雅黑
+    if ( !m_fonts.m_esp )
+    {
+        m_fonts.m_esp = io.Fonts->AddFontFromFileTTF(
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            20.0f,
+            &font_cfg,
+            glyph_ranges
+        );
+    }
+
     ImGui::GetIO( ).Fonts->AddFontDefault( );
 }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <array>
 #include <vector>
+#include <string>
 #include "vector3.hpp"
 #include "vector2.hpp"
 #include "matrix.hpp"
@@ -32,6 +33,9 @@ struct SImGuiUnit
 	bool bOnScreen = false;
 
 	uintptr_t unitAddr = 0;
+
+	// 载具名字（从游戏内存读取的 UTF-8 字符串）
+	std::string vehicleName;
 
 	vec3_t worldOrigin;
 	AABB worldBounds;

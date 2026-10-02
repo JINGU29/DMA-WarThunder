@@ -1,6 +1,7 @@
 #include "includes.hpp"
 
 // Data
+static bool                     g_bShowDebug = true;  // Debug Info 窗口开关（F11 切换）
 static ID3D11Device*            g_pd3dDevice = nullptr;
 static ID3D11DeviceContext*     g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*          g_pSwapChain = nullptr;
@@ -144,16 +145,23 @@ int main( int, char** )
 
         esp::run( );
 
-        // Debug Info 覆盖层
+        // F11 切换 Debug Info 窗口显示/隐藏
+        if ( ImGui::IsKeyPressed( ImGuiKey_F11 ) )
+            g_bShowDebug = !g_bShowDebug;
+
+        // Debug Info 覆盖层（可拖动、可关闭）
+        if ( g_bShowDebug )
         {
             const ImGuiIO& io = ImGui::GetIO();
-            ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs
-                | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings
+            ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings
                 | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
 
             ImGui::SetNextWindowBgAlpha(0.65f);
-            ImGui::Begin("Debug Info", nullptr, flags);
-            ImGui::SetWindowPos(ImVec2(10, 10), ImGuiCond_Always);
+            ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+            bool bOpen = true;
+            ImGui::Begin("Debug Info", &bOpen, flags);
+            if ( !bOpen )
+                g_bShowDebug = false;
 
             ImGui::Text("FPS: %.1f", io.Framerate);
             ImGui::Text("Frame: %.2f ms", 1000.0f / io.Framerate);

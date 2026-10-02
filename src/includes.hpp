@@ -95,12 +95,36 @@ inline auto get_file_timestamp( ) -> std::string
 // 程序启动时确定日志文件路径，整个运行期间复用同一文件名
 inline std::string g_logFilePath;
 
+// 获取 %APPDATA%\war-thunder-data 数据根目录路径（动态，不硬编码用户名）
+// 首次调用时自动创建目录。返回值以反斜杠结尾，方便直接拼接子路径。
+inline auto get_app_data_dir( ) -> std::string
+{
+	char appdata[ MAX_PATH ] = { 0 };
+	if ( GetEnvironmentVariableA( "APPDATA", appdata, MAX_PATH ) == 0 )
+	{
+		// 极端情况下 APPDATA 不可用，回退到 SHGetFolderPathA
+		SHGetFolderPathA( nullptr, CSIDL_APPDATA, nullptr, 0, appdata );
+	}
+
+	std::string base = appdata;
+	if ( !base.empty( ) && base.back( ) != '\\' )
+		base += '\\';
+	base += "war-thunder-data\\";
+
+	// 自动创建根目录
+	CreateDirectoryA( base.c_str( ), nullptr );
+
+	return base;
+}
+
 inline auto init_log_file_path( ) -> void
 {
-	const char* dir = "C:\\Users\\lin\\AppData\\Roaming\\war-thunder-data\\log";
-	CreateDirectoryA( dir, nullptr );
+	std::string base = get_app_data_dir( );
+	std::string dir = base + "log";
+	CreateDirectoryA( dir.c_str( ), nullptr );
+	dir += '\\';
 	char path[ 512 ];
-	snprintf( path, sizeof( path ), "%s\\log_%s.txt", dir, get_file_timestamp( ).c_str( ) );
+	snprintf( path, sizeof( path ), "%slog_%s.txt", dir.c_str( ), get_file_timestamp( ).c_str( ) );
 	g_logFilePath = path;
 }
 

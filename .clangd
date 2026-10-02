@@ -1,0 +1,59 @@
+# clangd / IDE intellisense 配置文件
+# 让 IDE 正确识别 MSBuild 项目的 include 路径和宏定义
+# 消除不影响编译的 linter 误报（MSBuild 编译正常但 IDE 缺少上下文导致误报）
+
+CompileFlags:
+  Add:
+    # 项目头文件搜索路径
+    - -Ilib/imgui
+    - -Ilib/imgui/backends
+    - -Ilib/dma
+    - -Isrc
+    - -Isrc/core
+    - -Isrc/features
+    - -Isrc/game
+    - -Isrc/game/classes
+    - -Isrc/game/datatypes
+    - -Isrc/memory
+    - -Isrc/utils
+    - -Isrc/utils/render
+    - -Isrc/gui
+    # Windows SDK 和 MSVC 特定宏
+    - -D_WIN32
+    - -D_WIN64
+    - -D_WINDOWS
+    - -D_CONSOLE
+    - -DUNICODE
+    - -D_UNICODE
+    - -D_CRT_SECURE_NO_WARNINGS
+    - -DNOMINMAX
+    - -DWIN32_LEAN_AND_MEAN
+    # C++ 标准（项目使用 stdcpplatest）
+    - -std=c++23
+    # 目标平台（MSVC ABI）
+    - --target=x86_64-pc-windows-msvc
+
+Diagnostics:
+  # 抑制 clangd 无法解析的误报（这些在 MSBuild 编译中完全正常）
+  # 使用通配符匹配错误描述
+  Suppress:
+    - "*default member initializer for 'VMM'*"
+    - "*no type named 'string_view' in namespace 'std'*"
+    - "*no matching member function for call to 'text'*"
+    - "*Too many errors emitted*"
+    - "*undeclared identifier 'TargetProcess'*"
+    - "*undeclared identifier 'baseAddr'*"
+    - "*undeclared identifier 'baseSize'*"
+    - "*undeclared identifier 'LOG'*"
+    - "*undeclared identifier 'SM_CXSCREEN'*"
+    - "*undeclared identifier 'SM_CYSCREEN'*"
+    - "*undeclared identifier 'IM_COL32'*"
+    - "*undeclared identifier 'max'*"
+    - "*undeclared identifier 'min'*"
+    - "*unknown type name 'ImU32'*"
+    - "*unknown type name 'VMMDLL_SCATTER_HANDLE'*"
+    - "*unknown type name 'c_movement_air'*"
+    - "*unknown type name 'c_ballistic'*"
+    - "*unknown type name 'NTSTATUS'*"
+    - "*Inline variables are a C++17 extension*"
+    - "*Included header*is not used directly*"
