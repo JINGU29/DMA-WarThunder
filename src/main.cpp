@@ -208,12 +208,13 @@ int main( int, char** )
                         debugData.bombImpactPoint.x, debugData.bombImpactPoint.y, debugData.bombImpactPoint.z);
                 }
 
-                // 弹道数据（已移除，偏移量过时全为0）
+                // 弹道 / 预测状态（调试详情已写到日志文件，每 5 秒一行）
+                ImGui::Text( "BallisticPred: %s", misc::bBallisticPrediction ? "ON" : "OFF" );
 
             }
 
-            ImGui::Separator();
-            ImGui::Text("Aimbot: %s", misc::bAimbotEnabled ? "ON" : "OFF");
+            ImGui::Separator( );
+            ImGui::Text( "Aimbot: %s", misc::bAimbotEnabled ? "ON" : "OFF" );
 
             ImGui::End();
         }

@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <array>
+#include <cmath>
 
 #include "..\..\game\datatypes\game_data.hpp"
 #include "..\..\game\datatypes\matrix.hpp"
@@ -59,10 +60,15 @@ namespace esp
         }
 
         // 遍历预计算的 unit 数据进行渲染
+        int totalUnits   = static_cast<int>(renderData.units.size());
+        int validEnemies = 0;
+        int drawnBoxes   = 0;
+        int drawnPred    = 0;
         for ( const SImGuiUnit& unit : renderData.units )
         {
             if ( !unit.bValidEnemy )
                 continue;
+            ++validEnemies;
 
             // 对预计算的世界顶点做 world_to_screen（使用最新视角矩阵）
             std::array<vec2_t, 8> screen_corners;
@@ -81,6 +87,7 @@ namespace esp
             // 只要至少 1 个顶点可见就画框
             if ( visible_count > 0 )
             {
+                ++drawnBoxes;
                 // 计算屏幕边界
                 float box_bottom_y = 0.0f;
                 float box_top_y = 0.0f;
@@ -166,21 +173,129 @@ namespace esp
                 g_render->text( reload_pos, IM_COL32( 0, 200, 255, 255 ), 0, reload_text, g_render->fonts( ).m_esp );
             }
 
-            // aimbot 预测绘制（使用预计算的瞄准点）
-            if ( misc::bAimbotEnabled && unit.bHasAimPoint )
-            {
-                vec2_t aimScreen;
-                if ( g_render->world_to_screen( unit.aimPoint, aimScreen, camera_matrix ) )
-                {
-                    // 黄色小方块标记预测命中点
-                    g_render->rect( aimScreen.x - 4, aimScreen.y - 4, 8, 8, IM_COL32( 255, 255, 0, 200 ), 2.0f );
-
-                    // 红色连线指向目标
-                    vec2_t unitScreen;
-                    if ( g_render->world_to_screen( unit.worldOrigin, unitScreen, camera_matrix ) )
-                        g_render->line( unitScreen.x, unitScreen.y, aimScreen.x, aimScreen.y, IM_COL32( 255, 0, 0, 200 ), 2.0f );
-                }
-            }
+			// 弹道预测绘制：末端红色方框标预测命中点（提前量+下坠补偿后的位置）
+			if ( misc::bBallisticPrediction && unit.bHasAimPoint )
+			{
+				++drawnPred;
+				vec2_t aimScreen;
+				if ( g_render->world_to_screen( unit.aimPoint, aimScreen, camera_matrix ) )
+				{
+					// 红色方框标记预测命中点
+					g_render->rect( aimScreen.x - 5, aimScreen.y - 5, 10, 10, IM_COL32( 255, 0, 0, 255 ), 2.0f );
+					g_render->filled_rect( aimScreen.x - 1, aimScreen.y - 1, 2, 2, IM_COL32( 255, 0, 0, 220 ), 0, 0 );
+				}
+			}
         }
+
+		// 节流日志（5 秒一次）：ESP 渲染计数器，用于诊断画面不显示的原因
+		static auto s_lastEspLog = std::chrono::steady_clock::now();
+		const auto s_now = std::chrono::steady_clock::now();
+		if ( std::chrono::duration_cast<std::chrono::seconds>( s_now - s_lastEspLog ).count() >= 5 )
+		{
+			s_lastEspLog = s_now;
+			const char* firstUnitName = "<none>";
+			float firstUnitDist = 0.0f;
+			float firstUnitVel = 0.0f;
+			int firstUnitVis = 0;
+			if ( validEnemies > 0 )
+			{
+				for ( const auto& u : renderData.units )
+				{
+					if ( !u.bValidEnemy ) continue;
+					firstUnitName = u.vehicleName.empty() ? "<noname>" : u.vehicleName.c_str();
+					firstUnitDist = u.distance;
+					firstUnitVel = u.velocity.length();
+					// 重新计算 visible_count 以便日志输出
+					for ( size_t k = 0; k < u.worldCorners.size(); ++k )
+					{
+						vec2_t tmp;
+						if ( g_render->world_to_screen( u.worldCorners[k], tmp, camera_matrix ) )
+							++firstUnitVis;
+					}
+					break;
+				}
+			}
+			const char* validity = renderData.bIsValid ? "VALID" : "INVALID";
+			const uint8_t gs = sdk::cLocalPlayer->getGuiState();
+			const char* gsStr = ( gs == GuiState::BATTLE ) ? "BATTLE" :
+								( gs == GuiState::ALIVE ) ? "ALIVE" :
+								( gs == GuiState::SPECTATE ) ? "SPEC" :
+								( gs == GuiState::DEAD ) ? "DEAD" :
+								( gs == GuiState::MENU ) ? "MENU" : "OTHER";
+			const auto& cm = camera_matrix.m_matrix;
+			char camBuf[160];
+			snprintf( camBuf, sizeof( camBuf ), "cam[0][3]=%.2f [1][3]=%.2f [2][3]=%.2f [3][3]=%.2f [3][0..2]=(%.0f,%.0f,%.0f)",
+				cm[0][3], cm[1][3], cm[2][3], cm[3][3], cm[3][0], cm[3][1], cm[3][2] );
+			if ( validEnemies > 0 )
+			{
+				char unitCornersSample[160];
+				const auto& wcu = renderData.units;
+				for ( const auto& u : wcu )
+				{
+					if ( !u.bValidEnemy ) continue;
+					const auto& w0 = u.worldCorners[0];
+					const auto& w7 = u.worldCorners[7];
+					snprintf( unitCornersSample, sizeof( unitCornersSample ),
+						" unit0[0]=(%.0f,%.0f,%.0f) [7]=(%.0f,%.0f,%.0f)",
+						w0.x, w0.y, w0.z, w7.x, w7.y, w7.z );
+					break;
+				}
+				char* p = unitCornersSample + strlen( unitCornersSample );
+				const auto& wcu2 = renderData.units;
+				for ( const auto& u : wcu2 )
+				{
+					if ( !u.bValidEnemy ) continue;
+				snprintf( p, sizeof( unitCornersSample ) - strlen( unitCornersSample ), " origin=(%.0f,%.0f,%.0f)",
+					u.worldOrigin.x, u.worldOrigin.y, u.worldOrigin.z );
+					break;
+				}
+				char unitCornersData[160] = "";
+				char* p2 = unitCornersData;
+				for ( const auto& u : renderData.units )
+				{
+					if ( !u.bValidEnemy ) continue;
+					snprintf( p2, 160 - strlen( unitCornersData ), " origin=(%.0f,%.0f,%.0f)", u.worldOrigin.x, u.worldOrigin.y, u.worldOrigin.z );
+					break;
+				}
+				const auto& firstUnitRef = [&]() -> const SImGuiUnit* {
+					for ( const auto& u : renderData.units )
+						if ( u.bValidEnemy ) return &u;
+					return nullptr;
+				}();
+				char cornersFull[256] = "";
+				if ( firstUnitRef )
+				{
+					const auto& u = *firstUnitRef;
+					const auto& w0 = u.worldCorners[0];
+					const auto& w7 = u.worldCorners[7];
+					snprintf( cornersFull, sizeof( cornersFull ),
+						" box[0]=(%.0f,%.0f,%.0f) box[7]=(%.0f,%.0f,%.0f) origin=(%.0f,%.0f,%.0f)",
+						w0.x, w0.y, w0.z, w7.x, w7.y, w7.z,
+						u.worldOrigin.x, u.worldOrigin.y, u.worldOrigin.z );
+				}
+				char firstUnitSample[320];
+				snprintf( firstUnitSample, sizeof( firstUnitSample ),
+					" first=%s %.0fm vel=%.1f visibleCorners=%d %s",
+					firstUnitName, firstUnitDist, firstUnitVel, firstUnitVis, cornersFull );
+				// 完整一行日志
+				char fullLine[768];
+				snprintf( fullLine, sizeof( fullLine ),
+					"ESPRender: total=%d valid=%d boxes=%d pred=%d | gui=%s(%d) %s | localY=%.0f\n",
+					totalUnits, validEnemies, drawnBoxes, drawnPred,
+					gsStr, gs, firstUnitSample,
+					renderData.localPosition.y );
+				LOG( "%s", fullLine );
+		}
+		else
+		{
+			char line[256];
+			snprintf( line, sizeof( line ),
+				"ESPRender: total=%d valid=%d boxes=%d pred=%d | gui=%s(%d) NO_VALID_ENEMY | localPos=(%.0f,%.0f,%.0f)\n",
+				totalUnits, validEnemies, drawnBoxes, drawnPred,
+				gsStr, gs,
+				renderData.localPosition.x, renderData.localPosition.y, renderData.localPosition.z );
+			LOG( "%s", line );
+			}
+		}
     }
 }

@@ -3,6 +3,8 @@
 #include <mutex>
 #include <array>
 #include <vector>
+#include <cmath>
+#include <chrono>
 
 #include "..\..\game\datatypes\game_data.hpp"
 #include "..\..\game\datatypes\matrix.hpp"
@@ -27,6 +29,9 @@ namespace misc
 
 	// aimbot 开关
 	inline bool bAimbotEnabled = false;
+
+	// 弹道预测开关（提前量 + 下坠补偿，陆战坦克为主）
+	inline bool bBallisticPrediction = true;
 
 	// 判断是否为有效敌人
 	inline auto is_valid_enemy( uint16_t unitState, uint8_t team ) -> bool
@@ -194,18 +199,18 @@ namespace misc
 		const size_t numUnits = validUnits.size( );
 
 		// 为每个 unit 准备读取缓冲区
-		struct UnitReadBuffer
-		{
-			vec3_t position;
-			vec3_t bbmin;
-			vec3_t bbmax;
-			matrix3x4_t rotation;
-			uint16_t unitState;
-			uint8_t team;
-			uint8_t reloadTime;
-			uintptr_t groundMovement;
-			uint32_t flags; // unit + 0x90 起 4 字节（m_UnitFlags1-4），0x800 位疑似可见标志
-		};
+struct UnitReadBuffer
+	{
+		vec3_t position;
+		vec3_t bbmin;
+		vec3_t bbmax;
+		matrix3x4_t rotation;
+		uint16_t unitState;
+		uint8_t team;
+		uint8_t reloadTime;
+		uintptr_t groundMovement;
+		uint32_t flags; // unit + 0x90 起 4 字节（m_UnitFlags1-4），0x800 位疑似可见标志
+	};
 
 		std::vector<UnitReadBuffer> buffers( numUnits );
 
@@ -235,7 +240,7 @@ namespace misc
 		const vec3_t local_position = sdk::cLocalPlayer->getLocalUnit( ).getPosition( );
 		computedData.localPosition = local_position;
 
-		// 检查本地玩家是否为飞机
+		// 读取本地玩家是否为飞机
 		computedData.bLocalIsPlane = sdk::cLocalPlayer->getLocalUnit( ).getInfo( ).isPlane( );
 
 		// 炸弹落点（飞机模式）
@@ -244,6 +249,9 @@ namespace misc
 			computedData.bombImpactPoint = sdk::cGame->ballistics->getBombImpactPoint( );
 			computedData.bHasBombImpact = true;
 		}
+
+		// 弹速（当前武器弹药速度，陆战坦克预测用）
+		computedData.ballisticVelocity = sdk::cGame->ballistics->getVelocity( );
 
 		// 构建 SImGuiUnit 列表
 		for ( size_t i = 0; i < numUnits; i++ )
@@ -258,6 +266,7 @@ namespace misc
 
 			SImGuiUnit unit;
 			unit.unitAddr = validUnits[i];
+			unit.bValidEnemy = true; // 通过 is_valid_enemy 过滤，标记为有效敌人供渲染线程使用
 
 			// 读取载具名字：unit + info_offset(0x1010) -> info + 0x28 -> ReadString
 			// 字符串需要两步间接寻址，无法通过 scatter read 批量读取，单独读取
@@ -295,14 +304,52 @@ namespace misc
 			unit.team = buffers[i].team;
 			unit.unitState = buffers[i].unitState;
 			unit.reloadTime = buffers[i].reloadTime;
-			// 速度读取已移除（aimbot 关闭时不需要）
-			unit.bValidEnemy = true;
+
+			// 目标速度：unit+0x2100 是"地面运动容器"指针（第三方 2.59.0.44 验证），
+			// 速度向量在容器内 +0x5C（ground_velocity_offset）。必须二次解引用，不能直接当 vec3 读！
+			{
+				vec3_t tgtVel;
+				if ( buffers[i].groundMovement )
+				{
+					tgtVel = TargetProcess->Read< vec3_t >( buffers[i].groundMovement + offsets::unit_offsets::ground_velocity_offset );
+				}
+				else
+				{
+					// 地面容器无效（可能是飞机）：尝试空中运动容器
+					// airContainer(0xD50) + 0x15E4（第三方 air_velocity_offset）
+					const uintptr_t airMov = TargetProcess->Read< uintptr_t >( validUnits[i] + offsets::unit_offsets::airContainer_offset );
+					if ( airMov )
+						tgtVel = TargetProcess->Read< vec3_t >( airMov + 0x15E4 );
+				}
+				unit.velocity = tgtVel;
+			}
+
+			// 距离：unit.distance = 2D 水平；另存 3D 直线距离用于弹道飞行时间
 			unit.distance = local_position.dist_to( buffers[i].position );
+			unit.distance3d = ( buffers[i].position - local_position ).length( );
 
 			// 可见性检测：flags 0x800 位疑似"可见"标志（第三方验证逻辑）
 			// 近距离(<=230m)按第三方惯例保守判定为可见，远处以标志位为准
 			unit.unitFlags = buffers[i].flags;
 			unit.bVisible = ( unit.distance <= 230.0f ) || ( ( buffers[i].flags & 0x800 ) != 0 );
+
+			// 弹道预测：提前量（目标速度×飞行时间）+ 下坠补偿（0.5*g*t^2）
+			// 参考第三方：fTime = dist/弹速；aim = 目标位置 + 目标速度×fTime；y += 0.5*9.81*fTime²
+			// 距离：3D 直线距离（比 2D 水平距离更贴近真实弹道飞行长度）
+			if ( misc::bBallisticPrediction && computedData.ballisticVelocity > 10.0f )
+			{
+				const float fDist = ( unit.distance3d > 8.0f ) ? unit.distance3d : unit.distance;
+				const float fTime = fDist / computedData.ballisticVelocity;
+
+				// 目标瞄准点：车体包围盒中部（比 worldOrigin 更接近实际命中面）
+				vec3_t targetPos = unit.worldOrigin;
+				targetPos.y += ( buffers[i].bbmin.y + buffers[i].bbmax.y ) * 0.5f;
+
+				vec3_t aimPoint = targetPos + unit.velocity * fTime;
+				aimPoint.y += 0.5f * 9.81f * fTime * fTime;
+				unit.aimPoint = aimPoint;
+				unit.bHasAimPoint = true;
+			}
 
 			// 预计算 8 个世界坐标顶点（用旋转矩阵变换）
 			// world_to_screen 延迟到渲染线程做，确保视角矩阵是最新的
@@ -341,6 +388,51 @@ namespace misc
 		{
 			std::lock_guard<std::mutex> lock( g_gameMutex );
 			g_gameData = std::move( computedData );
+		}
+
+		// 节流日志（5 秒一次）：弹道预测关键数据，方便在 %APPDATA%\war-thunder-data\log\*.txt 中跟踪
+		{
+			static auto s_lastLog = std::chrono::steady_clock::now( );
+			const auto now = std::chrono::steady_clock::now( );
+			if ( std::chrono::duration_cast<std::chrono::seconds>( now - s_lastLog ).count( ) >= 5 )
+			{
+				s_lastLog = now;
+				if ( g_gameData.bIsValid && !g_gameData.units.empty( ) )
+				{
+				const auto& u0 = g_gameData.units.front( );
+				const float velMag = u0.velocity.length( );
+				const float distUsed = u0.distance3d > 8.0f ? u0.distance3d : u0.distance;
+				char distBuf[48];
+				snprintf( distBuf, sizeof( distBuf ), "dist=%.1fm", distUsed );
+					const float fTimeUsed = ( g_gameData.ballisticVelocity > 10.0f ) ? ( distUsed / g_gameData.ballisticVelocity ) : 0.0f;
+					char aimBuf[64];
+					if ( u0.bHasAimPoint )
+						snprintf( aimBuf, sizeof( aimBuf ), " aim=(%.0f,%.0f,%.0f)", u0.aimPoint.x, u0.aimPoint.y, u0.aimPoint.z );
+					else
+						aimBuf[0] = '\0';
+					char fTimeBuf[48];
+					if ( velMag > 0.01f )
+						snprintf( fTimeBuf, sizeof( fTimeBuf ), " fTime=%.3fs lead=%.1fm", fTimeUsed, velMag * fTimeUsed );
+					else
+						fTimeBuf[0] = '\0';
+					char dropBuf[48];
+					if ( g_gameData.ballisticVelocity > 10.0f )
+						snprintf( dropBuf, sizeof( dropBuf ), " drop=%.2fm", 0.5f * 9.81f * fTimeUsed * fTimeUsed );
+					else
+						dropBuf[0] = '\0';
+
+					if ( !u0.vehicleName.empty( ) )
+						LOG( "BallisticPred: bVel=%.1f %s | %s vel=%.2f(m/s)%s%s%s\n",
+							g_gameData.ballisticVelocity, distBuf, u0.vehicleName.c_str( ), velMag, aimBuf, fTimeBuf, dropBuf );
+					else
+						LOG( "BallisticPred: bVel=%.1f %s | <unknown> vel=%.2f(m/s)%s%s%s\n",
+							g_gameData.ballisticVelocity, distBuf, velMag, aimBuf, fTimeBuf, dropBuf );
+				}
+				else
+				{
+					LOG( "BallisticPred: bVel=%.1f nolocalunit\n", g_gameData.ballisticVelocity );
+				}
+			}
 		}
 	}
 

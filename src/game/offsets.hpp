@@ -64,8 +64,10 @@ namespace offsets
 			constexpr uintptr_t bomb_impact_point = 0x1CCC;
 			// Bullet impact point - not in new dump, keeping old value
 			constexpr uintptr_t bullet_impact_point = 0x22C8 + 0x20;
-			// Ballistics data (velocity, mass, caliber, length, max_dist) - not in new dump, keeping old values
-			constexpr uintptr_t velocity = 0x2050;
+			// Ballistics data (velocity, mass, caliber, length, max_dist)
+			// velocity 用用户提供的第三方验证偏移 0x2118
+			// (ballistics 容器: c_game + 0x3f0 -> + 0x2118 = 弹速 float)
+			constexpr uintptr_t velocity = 0x2118;
 			constexpr uintptr_t mass = 0x205C;
 			constexpr uintptr_t caliber = 0x2060;
 			constexpr uintptr_t length = 0x2048;
@@ -125,7 +127,8 @@ namespace offsets
 		constexpr uintptr_t armory_offset = 0x10D0;
 		constexpr uintptr_t damageModelCont_offset = 0x10A8;
 		constexpr uintptr_t playerInfo_offset = 0xFA0;
-		constexpr uintptr_t groundmovement_offset = 0x1F00;
+		// 地面运动容器指针（unit + 0x2100 是指针！速度在容器内 +0x5C，第三方 2.59.0.44 验证）
+		constexpr uintptr_t groundmovement_offset = 0x2100;
 	}
 
 	namespace unit_info_offsets

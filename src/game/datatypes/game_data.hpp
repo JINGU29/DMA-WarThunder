@@ -7,6 +7,7 @@
 #include "vector3.hpp"
 #include "vector2.hpp"
 #include "matrix.hpp"
+#include "vector3.hpp"
 
 // 游戏上下文：cGame / cCamera / 视角矩阵
 struct SImGuiGame
@@ -51,6 +52,8 @@ struct SImGuiUnit
 	uint8_t reloadTime = 0;
 
 	float distance = 0.0f;
+	// 3D 直线距离（比 distance 更贴近飞行轨迹的直线距离，用于弹道预测飞行时间）
+	float distance3d = 0.0f;
 
 	// 8 个世界坐标顶点（预计算，渲染线程做 world_to_screen）
 	std::array<vec3_t, 8> worldCorners;
