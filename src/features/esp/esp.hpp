@@ -107,8 +107,9 @@ namespace esp
                     }
                 }
 
-                // 画可见顶点之间的线框边
-                ImU32 box_color = IM_COL32(255, 0, 0, 255);
+// 画可见顶点之间的线框边
+				// 可见性颜色：可见=绿，被遮挡/不可见=红
+				ImU32 box_color = unit.bVisible ? IM_COL32( 0, 255, 0, 255 ) : IM_COL32( 255, 0, 0, 255 );
                 // 底面四条边
                 if ( corners_visible[0] && corners_visible[1] ) g_render->line( screen_corners[0].x, screen_corners[0].y, screen_corners[1].x, screen_corners[1].y, box_color, 1.0f );
                 if ( corners_visible[1] && corners_visible[3] ) g_render->line( screen_corners[1].x, screen_corners[1].y, screen_corners[3].x, screen_corners[3].y, box_color, 1.0f );

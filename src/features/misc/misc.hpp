@@ -204,6 +204,7 @@ namespace misc
 			uint8_t team;
 			uint8_t reloadTime;
 			uintptr_t groundMovement;
+			uint32_t flags; // unit + 0x90 起 4 字节（m_UnitFlags1-4），0x800 位疑似可见标志
 		};
 
 		std::vector<UnitReadBuffer> buffers( numUnits );
@@ -219,6 +220,7 @@ namespace misc
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::teamNum_offset ), &buffers[i].team, sizeof( uint8_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::visualReload_offset ), &buffers[i].reloadTime, sizeof( uint8_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::groundmovement_offset ), &buffers[i].groundMovement, sizeof( uintptr_t ) );
+			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitFlags1_offset ), &buffers[i].flags, sizeof( uint32_t ) );
 		}
 
 		if ( !TargetProcess->ExecuteReadScatter( hScatter, 0, true ) )
@@ -296,6 +298,11 @@ namespace misc
 			// 速度读取已移除（aimbot 关闭时不需要）
 			unit.bValidEnemy = true;
 			unit.distance = local_position.dist_to( buffers[i].position );
+
+			// 可见性检测：flags 0x800 位疑似"可见"标志（第三方验证逻辑）
+			// 近距离(<=230m)按第三方惯例保守判定为可见，远处以标志位为准
+			unit.unitFlags = buffers[i].flags;
+			unit.bVisible = ( unit.distance <= 230.0f ) || ( ( buffers[i].flags & 0x800 ) != 0 );
 
 			// 预计算 8 个世界坐标顶点（用旋转矩阵变换）
 			// world_to_screen 延迟到渲染线程做，确保视角矩阵是最新的

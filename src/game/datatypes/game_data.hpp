@@ -34,6 +34,11 @@ struct SImGuiUnit
 
 	uintptr_t unitAddr = 0;
 
+	// 单位标志位（unit + 0x90 起 4 字节，m_UnitFlags1-4）
+	uint32_t unitFlags = 0;
+	// 可见性（数据线程计算，渲染线程着色用）：可见=true 被遮挡=false
+	bool bVisible = true;
+
 	// 载具名字（从游戏内存读取的 UTF-8 字符串）
 	std::string vehicleName;
 
