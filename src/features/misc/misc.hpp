@@ -276,6 +276,13 @@ namespace misc
 							while ( ( pos = unit.vehicleName.find( zwsp, pos ) ) != std::string::npos )
 								unit.vehicleName.erase( pos, 3 );
 						}
+
+						// 过滤防空炮/火炮：中文客户端单位名为"防空炮"(E9 98 B2 E7 A9 BA)、"火炮"(E7 81 AB E7 82 AE)，陆战/空战均不显示
+						// 用字节转义避免源文件编码问题
+						if ( unit.vehicleName.find( "\xE9\x98\xB2\xE7\xA9\xBA" ) != std::string::npos )
+							continue;
+						if ( unit.vehicleName.find( "\xE7\x81\xAB\xE7\x82\xAE" ) != std::string::npos )
+							continue;
 					}
 				}
 			}
