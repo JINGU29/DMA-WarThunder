@@ -38,6 +38,117 @@ namespace esp
         return misc::g_gameData;
     }
 
+    // ── DamageModel 乘员/弹药/油箱/炮闩部件标记（Style 1：真实盒线框 + 投影最长边<9px 时兜底 16px 方框）──
+    // 数据源：misc 数据线程从网格束链解码并预变换为世界角点（unit.partBoxes），此处仅投影绘制。
+    // 开镜缩放自动保证：盒为世界空间（随投影放大）；兜底阈值为屏幕像素判定（放大后超阈即回真实盒形）。
+    // 分级 LOD 防远距糊团（单车 ammo 部件多达 40~86 个，兜底框叠加糊成一团），按敌人 8 角大盒投影最长边定级：
+    //   ≥kLodFullPx 全细节逐盒；kLodOffPx~kLodFullPx 弹药合并成单个红色包围框、其余照常；<kLodOffPx 全隐藏。
+    inline auto draw_part_markers( const SImGuiUnit& unit, const matrix4x4_t& matrix ) -> void
+    {
+        if ( !misc::bPartMarkersCrew && !misc::bPartMarkersAmmo && !misc::bPartMarkersFuel && !misc::bPartMarkersBreech )
+            return;
+
+        // LOD 定级：敌人 8 角大盒（worldCorners）屏幕投影范围
+        constexpr float kLodFullPx = 150.0f;   // ≥此值 → 全细节（阈值按实测观感可调）
+        constexpr float kLodOffPx  = 55.0f;    // <此值 → 部件标记全隐藏（只剩敌人8角大盒）
+        std::array<vec2_t, 8> bs;
+        for ( int i = 0; i < 8; ++i )
+            if ( !g_render->world_to_screen( unit.worldCorners[i], bs[i], matrix ) )
+                return;   // 大盒任一角在视点后 → 整个单位跳过
+        float bMinX = bs[0].x, bMaxX = bs[0].x, bMinY = bs[0].y, bMaxY = bs[0].y;
+        for ( int i = 1; i < 8; ++i )
+        {
+            bMinX = ( std::min )( bMinX, bs[i].x ); bMaxX = ( std::max )( bMaxX, bs[i].x );
+            bMinY = ( std::min )( bMinY, bs[i].y ); bMaxY = ( std::max )( bMaxY, bs[i].y );
+        }
+        const float lodSide = ( std::max )( bMaxX - bMinX, bMaxY - bMinY );
+        if ( lodSide < kLodOffPx )
+            return;
+        const bool fullLod = ( lodSide >= kLodFullPx );
+
+        const ImU32 colCrew = IM_COL32( 255, 140, 26, 235 );    // 乘员=橙
+        const ImU32 colAmmo = IM_COL32( 255, 45, 45, 235 );     // 弹药=红
+        const ImU32 colFuel = IM_COL32( 80, 220, 90, 235 );     // 油箱=绿
+        const ImU32 colBreech = IM_COL32( 255, 220, 60, 235 );  // 炮闩=黄
+        constexpr float minPx = 9.0f;          // 投影最长边低于此值走兜底
+        constexpr float fallbackHalf = 8.0f;   // 兜底框半边长（16px）
+
+        // 中距弹药合并：累加所有 ammo 盒的屏幕包围范围，循环结束后画一个合并框
+        float aMinX = 0.0f, aMaxX = 0.0f, aMinY = 0.0f, aMaxY = 0.0f;
+        bool anyAmmo = false;
+
+        for ( const auto& pb : unit.partBoxes )
+        {
+            // 按类别查开关（四独立开关：乘员/弹药/油箱/炮闩）
+            const ImU32 col = ( pb.cls == EPartClass::Crew ) ? colCrew :
+                              ( pb.cls == EPartClass::Ammo ) ? colAmmo :
+                              ( pb.cls == EPartClass::Fuel ) ? colFuel : colBreech;
+            const bool enabled = ( pb.cls == EPartClass::Crew ) ? misc::bPartMarkersCrew :
+                                 ( pb.cls == EPartClass::Ammo ) ? misc::bPartMarkersAmmo :
+                                 ( pb.cls == EPartClass::Fuel ) ? misc::bPartMarkersFuel :
+                                                                  misc::bPartMarkersBreech;
+            if ( !enabled )
+                continue;
+
+            std::array<vec2_t, 8> s;
+            bool ok = true;
+            for ( int i = 0; i < 8; ++i )
+            {
+                if ( !g_render->world_to_screen( pb.corners[i], s[i], matrix ) )
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            if ( !ok )
+                continue;
+
+            // 中距档弹药：不逐盒画，并入屏幕包围范围（防 40~86 个兜底框糊团）
+            if ( pb.cls == EPartClass::Ammo && !fullLod )
+            {
+                if ( !anyAmmo )
+                {
+                    aMinX = aMaxX = s[0].x; aMinY = aMaxY = s[0].y;
+                    anyAmmo = true;
+                }
+                for ( int i = 0; i < 8; ++i )
+                {
+                    aMinX = ( std::min )( aMinX, s[i].x ); aMaxX = ( std::max )( aMaxX, s[i].x );
+                    aMinY = ( std::min )( aMinY, s[i].y ); aMaxY = ( std::max )( aMaxY, s[i].y );
+                }
+                continue;
+            }
+
+            float minX = s[0].x, maxX = s[0].x, minY = s[0].y, maxY = s[0].y;
+            for ( int i = 1; i < 8; ++i )
+            {
+                minX = ( std::min )( minX, s[i].x ); maxX = ( std::max )( maxX, s[i].x );
+                minY = ( std::min )( minY, s[i].y ); maxY = ( std::max )( maxY, s[i].y );
+            }
+
+            const float maxSide = ( std::max )( maxX - minX, maxY - minY );
+            if ( maxSide < minPx )
+            {
+                // 远距退化：投影质心 16px 兜底框（保住“分布”可读性）
+                float cx = 0.0f, cy = 0.0f;
+                for ( int i = 0; i < 8; ++i ) { cx += s[i].x; cy += s[i].y; }
+                cx /= 8.0f; cy /= 8.0f;
+                g_render->rect( cx - fallbackHalf, cy - fallbackHalf, fallbackHalf * 2.0f, fallbackHalf * 2.0f, col );
+            }
+            else
+            {
+                // 真实盒线框（12 边；角点位序 bit0=x bit1=y bit2=z，与敌人大盒一致）
+                static const int edges[12][2] = { {0,1},{1,3},{3,2},{2,0},{4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7} };
+                for ( const auto& e : edges )
+                    g_render->line( s[e[0]].x, s[e[0]].y, s[e[1]].x, s[e[1]].y, col, 1.5f );
+            }
+        }
+
+        // 中距弹药合并框（整个弹药舱群画一个红色包围框）
+        if ( anyAmmo )
+            g_render->rect( aMinX, aMinY, aMaxX - aMinX, aMaxY - aMinY, colAmmo );
+    }
+
     // 渲染主函数 — 每帧读取最新视角矩阵，对预计算的世界顶点做 world_to_screen
     inline auto run( ) -> void
     {
@@ -185,6 +296,9 @@ namespace esp
 					g_render->filled_rect( aimScreen.x - 1, aimScreen.y - 1, 2, 2, IM_COL32( 255, 0, 0, 220 ), 0, 0 );
 				}
 			}
+
+			// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（Style 1 + 分级 LOD 防远距糊团）──
+			draw_part_markers( unit, camera_matrix );
         }
 
 		// 节流日志（5 秒一次）：ESP 渲染计数器，用于诊断画面不显示的原因

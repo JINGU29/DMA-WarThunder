@@ -416,3 +416,18 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# ── 工具目录（Orpheus DMA 工具链 / DMA-MCP 等本地逆向工具）：整体不提交 ──
+tools/
+
+# ── 本地文档（逆向进展/需求累积/提示词等 AI 协作过程文档）：不提交 ──
+docs/
+
+# ── 项目根目录杂项 ──
+# 无扩展名的临时文档（成员组色块渲染、unm 等笔记，已合并到 docs/）
+成员组色块渲染
+unm
+# Qoder 工作区配置
+.qoder/
+# offsets 缓存文件（update.hpp 运行时生成）
+offsets

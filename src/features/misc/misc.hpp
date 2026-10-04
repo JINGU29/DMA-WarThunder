@@ -34,6 +34,243 @@ namespace misc
 	// 弹道预测开关（提前量 + 下坠补偿，陆战坦克为主）
 	inline bool bBallisticPrediction = true;
 
+	// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（网格束链，2026-10-04 实测；链详见 offsets::damage_model::mesh_bundle 注释）──
+	inline bool bPartMarkersCrew = true;   // 菜单开关：乘员部件标记（橙，Style 1 渲染）
+	inline bool bPartMarkersAmmo = true;   // 菜单开关：弹药部件标记（红）
+	inline bool bPartMarkersFuel = false;  // 菜单开关：油箱部件标记（绿，默认关）
+	inline bool bPartMarkersBreech = true; // 菜单开关：炮闩部件标记（黄）；四开关相互独立
+
+	// 部件分类器：按 '_' 分段，否决词优先、乘员优先于弹药；与 tools/orpheus/dm_stylepreview.py 同表
+	// 新增类别（引擎等）只需加词表行；三载具样本（坦克/军舰/F-15）分类全对。
+	// 油箱实测命名（dm_hits 样本）：fuel_tank_dm / fuel_tank_01_dm / fuel_tank_l|r_NN_dm / fuel_tank_exterior_*_dm → 单段 "fuel" 全覆盖
+	// 炮闩实测命名：cannon_breech_dm / cannon_breech_01~05_dm → 单段 "breech" 全覆盖（炮管是 gun_barrel，不收）
+	inline auto classify_part( const std::string& name ) -> EPartClass
+	{
+		static const char* CREW[] = { "pilot", "copilot", "gunner", "driver", "commander", "loader", "crew",
+			"sailor", "operator", "radioman", "radio", "navigator", "bombardier", "wso", "gunlayer", "torpedoman" };
+		static const char* AMMO[] = { "ammo", "ammunition", "shell", "shells", "powder", "magazine",
+			"charges", "round", "rounds", "clip", "clips" };
+		static const char* FUEL[] = { "fuel", "fueltank" };
+		static const char* BREECH[] = { "breech" };
+		// 否决词：陷阱件（操控装置/瞄具/潜望镜/座椅舱盖/无线电台等含乘员弹药词但非本体；
+		// pump/pipe/filter/gauge/line 为燃油系统附件非油箱本体）
+		static const char* VETO[] = { "controls", "sight", "sights", "panoramic", "periscope", "optic",
+			"optics", "view", "seat", "hatch", "station",
+			"pump", "pipe", "pipes", "filter", "gauge", "line", "lines" };
+
+		std::string lower = name;
+		std::transform( lower.begin( ), lower.end( ), lower.begin( ), ::tolower );
+
+		auto match_seg = []( const std::string& seg, const char** words, size_t n ) -> bool {
+			for ( size_t k = 0; k < n; ++k )
+				if ( seg == words[k] )
+					return true;
+			return false;
+		};
+
+		// 第一遍：否决词优先
+		size_t start = 0;
+		while ( start <= lower.size( ) )
+		{
+			const size_t p = lower.find( '_', start );
+			const std::string seg = ( p == std::string::npos ) ? lower.substr( start ) : lower.substr( start, p - start );
+			if ( !seg.empty( ) && match_seg( seg, VETO, sizeof( VETO ) / sizeof( VETO[0] ) ) )
+				return EPartClass::None;
+			if ( p == std::string::npos )
+				break;
+			start = p + 1;
+		}
+		// 第二遍：乘员 → 弹药 → 油箱 → 炮闩
+		start = 0;
+		while ( start <= lower.size( ) )
+		{
+			const size_t p = lower.find( '_', start );
+			const std::string seg = ( p == std::string::npos ) ? lower.substr( start ) : lower.substr( start, p - start );
+			if ( !seg.empty( ) )
+			{
+				if ( match_seg( seg, CREW, sizeof( CREW ) / sizeof( CREW[0] ) ) )
+					return EPartClass::Crew;
+				if ( match_seg( seg, AMMO, sizeof( AMMO ) / sizeof( AMMO[0] ) ) )
+					return EPartClass::Ammo;
+				if ( match_seg( seg, FUEL, sizeof( FUEL ) / sizeof( FUEL[0] ) ) )
+					return EPartClass::Fuel;
+				if ( match_seg( seg, BREECH, sizeof( BREECH ) / sizeof( BREECH[0] ) ) )
+					return EPartClass::Breech;
+			}
+			if ( p == std::string::npos )
+				break;
+			start = p + 1;
+		}
+		return EPartClass::None;
+	}
+
+	// 网格束缓存条目（静态几何：模型空间部件盒）。仅数据线程（GameUpdate 单线程 32ms 周期）访问，无需加锁
+	struct SUnitMesh
+	{
+		uintptr_t objPtr = 0;					// 网格束 obj 指针（变化 → 重建日志）
+		std::vector<SPartBox> boxes;			// 模型空间部件盒（类别+8角）
+		std::vector<std::string> names;			// 命中部件名（日志对账用）
+		std::vector<std::array<float, 3>> prevT;	// 上次配位 t（探测炮塔转动是否更新配位数组）
+		int fetchCount = 0;
+		bool logged = false;
+		std::chrono::steady_clock::time_point lastFetch{};
+		bool valid = false;
+	};
+	inline std::unordered_map<uintptr_t, SUnitMesh> g_meshCache;
+
+	// 读取一个单位的网格束并重建缓存：链 4 跳 + header 块 + (部件表+配位连续读) + 名字池 = 7 次 DMA
+	inline auto fetch_unit_mesh( uintptr_t unitAddr, SUnitMesh& mesh ) -> bool
+	{
+		namespace mb = offsets::damage_model::mesh_bundle;
+
+		const uintptr_t dnet = TargetProcess->Read<uintptr_t>( unitAddr + offsets::unit_offsets::damageModelCont_offset );
+		if ( !dnet )
+			return false;
+		if ( TargetProcess->Read<uintptr_t>( dnet + mb::backref_off ) != unitAddr )	// 反指校验防误读
+			return false;
+		const uintptr_t obj = TargetProcess->Read<uintptr_t>( dnet + mb::obj_off );
+		if ( !obj )
+			return false;
+		const uintptr_t hdr = TargetProcess->Read<uintptr_t>( obj + mb::header_off );
+		if ( !hdr )
+			return false;
+
+		uint8_t hb[mb::hdr_block_size] = { 0 };
+		if ( !TargetProcess->Read( hdr, hb, sizeof( hb ) ) )
+			return false;
+		const uint32_t rel      = *reinterpret_cast<uint32_t*>( hb + mb::hdr_rel_off );
+		const uint32_t loop     = *reinterpret_cast<uint32_t*>( hb + mb::hdr_loop_off );
+		const uint32_t namePool = *reinterpret_cast<uint32_t*>( hb + mb::hdr_namepool_off );
+		const uint32_t nameSize = *reinterpret_cast<uint32_t*>( hb + mb::hdr_namesize_off );
+		if ( loop == 0 || loop > mb::max_parts )
+			return false;
+		if ( namePool == 0 || nameSize == 0 || nameSize > mb::max_name_size )
+			return false;
+
+		// 部件表与配位数组内存连续：[hdr+rel, hdr+rel + loop*(0x40+0x30))，一次读完
+		const size_t ptabSz  = static_cast<size_t>( loop ) * mb::part_stride;
+		const size_t totalSz = ptabSz + static_cast<size_t>( loop ) * mb::place_stride;
+		std::vector<uint8_t> buf( totalSz );
+		if ( !TargetProcess->Read( hdr + rel, buf.data( ), totalSz ) )
+			return false;
+		std::vector<uint8_t> nbuf( nameSize );
+		if ( !TargetProcess->Read( hdr + namePool, nbuf.data( ), nameSize ) )
+			return false;
+
+		const uint8_t* ptab  = buf.data( );
+		const uint8_t* place = buf.data( ) + ptabSz;
+
+		std::vector<SPartBox> boxes;
+		std::vector<std::string> names;
+		std::vector<std::array<float, 3>> newT( loop );
+
+		for ( uint32_t i = 0; i < loop; ++i )
+		{
+			const uint8_t* e  = ptab + static_cast<size_t>( i ) * mb::part_stride;
+			const float*   pl = reinterpret_cast<const float*>( place + static_cast<size_t>( i ) * mb::place_stride );
+			newT[i] = { pl[9], pl[10], pl[11] };
+
+			// 部件名（cstr，手动扫 NUL 截断防越界）
+			const uint32_t nameOff = *reinterpret_cast<const uint32_t*>( e + mb::part_name_off );
+			if ( nameOff >= nameSize )
+				continue;
+			const char* np = reinterpret_cast<const char*>( nbuf.data( ) ) + nameOff;
+			size_t len = 0;
+			while ( len < static_cast<size_t>( nameSize ) - nameOff && np[len] != '\0' )
+				++len;
+			const std::string nm( np, len );
+
+			const EPartClass cls = classify_part( nm );
+			if ( cls == EPartClass::None )
+				continue;
+
+			// 局部 AABB → 8 角 → 模型空间（R 行主序 · local + t）；退化盒跳过
+			const float* bmin = reinterpret_cast<const float*>( e + mb::part_min_off );
+			const float* bmax = reinterpret_cast<const float*>( e + mb::part_max_off );
+			if ( !( bmax[0] > bmin[0] && bmax[1] > bmin[1] && bmax[2] > bmin[2] ) )
+				continue;
+
+			SPartBox sb;
+			sb.cls = cls;
+			for ( int c = 0; c < 8; ++c )
+			{
+				const float lx = ( c & 1 ) ? bmax[0] : bmin[0];
+				const float ly = ( c & 2 ) ? bmax[1] : bmin[1];
+				const float lz = ( c & 4 ) ? bmax[2] : bmin[2];
+				sb.corners[c] = vec3_t{
+					pl[0] * lx + pl[1] * ly + pl[2] * lz + pl[9],
+					pl[3] * lx + pl[4] * ly + pl[5] * lz + pl[10],
+					pl[6] * lx + pl[7] * ly + pl[8] * lz + pl[11]
+				};
+			}
+			boxes.push_back( sb );
+			names.push_back( nm );
+		}
+
+		// 配位动态探测：与上次 t 对比（炮塔转动若会更新配位数组则有变化）
+		float maxTDelta = 0.0f;
+		if ( mesh.valid && mesh.prevT.size( ) == newT.size( ) )
+		{
+			for ( size_t i = 0; i < newT.size( ); ++i )
+				for ( int k = 0; k < 3; ++k )
+				{
+					const float d = newT[i][k] - mesh.prevT[i][k];
+					maxTDelta = ( std::max )( maxTDelta, d < 0.0f ? -d : d );
+				}
+		}
+
+		const bool objChanged = ( mesh.objPtr != obj );
+		mesh.objPtr = obj;
+		mesh.boxes = std::move( boxes );
+		mesh.names = std::move( names );
+		mesh.prevT = std::move( newT );
+		mesh.fetchCount++;
+		mesh.valid = true;
+		mesh.lastFetch = std::chrono::steady_clock::now( );
+		if ( objChanged )
+			mesh.logged = false;
+
+		// 日志：首次/obj 变化时输出分类清单（与 dm_stylepreview 对账）；前 3 次附带配位差值
+		if ( !mesh.logged || mesh.fetchCount <= 3 )
+		{
+			int crewN = 0, ammoN = 0, fuelN = 0, breechN = 0;
+			std::string crewList, ammoList, fuelList, breechList;
+			for ( size_t k = 0; k < mesh.boxes.size( ); ++k )
+			{
+				if ( mesh.boxes[k].cls == EPartClass::Crew )
+				{
+					++crewN;
+					crewList += mesh.names[k] + " ";
+				}
+				else if ( mesh.boxes[k].cls == EPartClass::Ammo )
+				{
+					++ammoN;
+					ammoList += mesh.names[k] + " ";
+				}
+				else if ( mesh.boxes[k].cls == EPartClass::Fuel )
+				{
+					++fuelN;
+					fuelList += mesh.names[k] + " ";
+				}
+				else
+				{
+					++breechN;
+					breechList += mesh.names[k] + " ";
+				}
+			}
+			LOG( "[MESH] unit=0x%llX parts=%u crew=%d ammo=%d fuel=%d breech=%d maxTdelta=%.4f fetch#%d\n[MESH]   crew: %s\n[MESH]   ammo: %s\n[MESH]   fuel: %s\n[MESH]   breech: %s\n",
+				static_cast<unsigned long long>( unitAddr ), loop, crewN, ammoN, fuelN, breechN, maxTDelta, mesh.fetchCount,
+				crewList.c_str( ), ammoList.c_str( ), fuelList.c_str( ), breechList.c_str( ) );
+			mesh.logged = true;
+		}
+		else if ( maxTDelta > 0.01f )
+		{
+			LOG( "[MESH-DYN] unit=0x%llX placement moving maxTdelta=%.4f\n",
+				static_cast<unsigned long long>( unitAddr ), maxTDelta );
+		}
+		return true;
+	}
+
 	// 判断是否为有效敌人
 	// flags: unit+0x90 的 4 字节（m_UnitFlags1-4）；unitType: unit+0x8C（0=飞机/无人机, 3=地面载具）
 	inline auto is_valid_enemy( uint16_t unitState, uint8_t team, uint32_t flags = 0, uint8_t unitType = 0 ) -> bool
@@ -553,6 +790,58 @@ struct UnitReadBuffer
 				{
 					s_unitNames.clear( );
 					s_goneReason.clear( );
+				}
+			}
+		}
+
+		// --- DamageModel 乘员/弹药/油箱/炮闩部件标记：节流拉取 + 模型→世界变换 ---
+		// 几何是静态资产（docs 9.25 节；第 13 轮实测 maxTdelta=0 无 [MESH-DYN] → 配位确认静态）：
+		// 每单位 2s 节流重拉；每周期预算限制拉取数量（6 个），摊薄 DMA 负载；
+		// 缓存收全部类别，绘制端按类别分别查开关（esp::draw_part_markers）。
+		if ( bPartMarkersCrew || bPartMarkersAmmo || bPartMarkersFuel || bPartMarkersBreech )
+		{
+			int fetchBudget = 6;
+			const auto nowMesh = std::chrono::steady_clock::now( );
+
+			for ( auto& u : computedData.units )
+			{
+				if ( !u.bValidEnemy )
+					continue;
+
+				SUnitMesh& mesh = g_meshCache[u.unitAddr];
+				if ( ( nowMesh - mesh.lastFetch ) >= std::chrono::seconds( 2 ) && fetchBudget > 0 )
+				{
+					--fetchBudget;
+					if ( !fetch_unit_mesh( u.unitAddr, mesh ) )
+					{
+						mesh.valid = false;
+						mesh.lastFetch = nowMesh;	// 失败也节流，避免每周期重试
+					}
+				}
+
+				if ( mesh.valid && !mesh.boxes.empty( ) )
+				{
+					u.partBoxes.resize( mesh.boxes.size( ) );
+					for ( size_t k = 0; k < mesh.boxes.size( ); ++k )
+					{
+						u.partBoxes[k].cls = mesh.boxes[k].cls;
+						for ( int c = 0; c < 8; ++c )
+							u.partBoxes[k].corners[c] = u.worldOrigin + u.rotation.transform( mesh.boxes[k].corners[c] );
+					}
+				}
+			}
+
+			// 缓存清理（30s 一次）：移除 60s 未刷新的条目（单位已销毁/离场）
+			static auto s_lastMeshCleanup = std::chrono::steady_clock::now( );
+			if ( ( nowMesh - s_lastMeshCleanup ) >= std::chrono::seconds( 30 ) )
+			{
+				s_lastMeshCleanup = nowMesh;
+				for ( auto it = g_meshCache.begin( ); it != g_meshCache.end( ); )
+				{
+					if ( ( nowMesh - it->second.lastFetch ) >= std::chrono::seconds( 60 ) )
+						it = g_meshCache.erase( it );
+					else
+						++it;
 				}
 			}
 		}

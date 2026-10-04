@@ -9,9 +9,10 @@ namespace offsets
 	namespace globals
 	{
 		// g_GameContext -> c_game pointer (was cgame_offset)
-		constexpr uintptr_t game_context = 0x7A23268;
+		// 使用 inline 而非 constexpr，允许 update.hpp 特征码扫描后运行时覆盖
+		inline uintptr_t game_context = 0x7A23268;
 		// g_LocalPlayer -> local player entity (was localplayer_offset)
-		constexpr uintptr_t local_player = 0x79FA898;
+		inline uintptr_t local_player = 0x79FA898;
 		// g_MyUnit -> local player's current unit
 		constexpr uintptr_t my_unit = 0x7A25210;
 		// g_ViewAngles
@@ -138,5 +139,35 @@ namespace offsets
 		constexpr uintptr_t haveCCIPForGun_offset = 0x457;
 		constexpr uintptr_t haveCCIPForRocket_offset = 0x456;
 		constexpr uintptr_t haveCCIPForTurret_offset = 0x458;
+	}
+
+	// ── DamageModel 网格束链（2026-10-04 实测；详见 docs/伤害模型模块渲染-进展与参考.md 9.25 节）──
+	// 旧 grump 方案A（容器+0x78=data_list）/方案B（TB0 0x40 步长）均已失效，当前版本用下述网格束链。
+	// 链路: unit+0x10A8(damageModelCont_offset) → dnet → dnet+0x58 → obj → obj+0x78 → header
+	// header 块: +0x04=rel(部件表相对偏移)  +0x08=loop(部件数)  +0x4C=namePool(名字池相对偏移)  +0x50=nameSize
+	// ptab  = header + rel            0x40/条: +0x08 boxMin  +0x14 boxMax(局部AABB)  +0x26 u16 HP(0xFFFF=未受损)  +0x3C u32 nameOff
+	// place = ptab + loop*0x40        0x30/条 = 12 float（R3x3 行主序 f0..f8 + t f9..f11）；模型坐标 = R·局部 + t
+	// 名字  = cstr(header + namePool + nameOff)
+	namespace damage_model
+	{
+		namespace mesh_bundle
+		{
+			constexpr uintptr_t backref_off      = 0x38;  // u64[dnet+0x38]==unitAddr 反指校验
+			constexpr uintptr_t obj_off          = 0x58;  // dnet → obj
+			constexpr uintptr_t header_off       = 0x78;  // obj → header
+			constexpr uintptr_t hdr_rel_off      = 0x04;  // u32 部件表相对偏移
+			constexpr uintptr_t hdr_loop_off     = 0x08;  // u32 部件数
+			constexpr uintptr_t hdr_namepool_off = 0x4C;  // u32 名字池相对偏移
+			constexpr uintptr_t hdr_namesize_off = 0x50;  // u32 名字池大小
+			constexpr uintptr_t hdr_block_size   = 0x60;  // header 一次读取块大小
+			constexpr uintptr_t part_stride      = 0x40;
+			constexpr uintptr_t part_min_off     = 0x08;  // vec3 局部 boxMin
+			constexpr uintptr_t part_max_off     = 0x14;  // vec3 局部 boxMax
+			constexpr uintptr_t part_hp_off      = 0x26;  // u16 HP（0xFFFF=未受损）
+			constexpr uintptr_t part_name_off    = 0x3C;  // u32 nameOff
+			constexpr uintptr_t place_stride     = 0x30;  // 12 float: R 行主序 f0..f8 + t f9..f11
+			constexpr uint32_t  max_parts        = 2048;  // loop 上限保护
+			constexpr uint32_t  max_name_size    = 0x100000;
+		}
 	}
 }

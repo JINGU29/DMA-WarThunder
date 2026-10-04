@@ -27,6 +27,24 @@ struct AABB
 	AABB( const vec3_t& min, const vec3_t& max ) : m_min( min ), m_max( max ) {}
 };
 
+// DamageModel 部件类别（分类器：关键词表，见 misc::classify_part）
+enum class EPartClass : uint8_t
+{
+	None = 0,
+	Crew,	// 乘员（pilot/gunner/driver/commander/loader/radio…）
+	Ammo,	// 弹药（ammo rack/shell/powder/magazine…）
+	Fuel,	// 油箱（fuel_tank_*_dm：主油箱/左右油箱/外挂油箱）
+	Breech	// 炮闩（cannon_breech_*_dm）
+};
+
+// DamageModel 部件盒（网格束解码）：8 角点
+// 在 misc::g_meshCache 中 corners=模型空间；在 SImGuiUnit::partBoxes 中 corners=世界空间（数据线程已变换）
+struct SPartBox
+{
+	EPartClass cls = EPartClass::None;
+	std::array<vec3_t, 8> corners{};
+};
+
 // 单个单位的预计算渲染数据
 struct SImGuiUnit
 {
@@ -59,6 +77,9 @@ struct SImGuiUnit
 
 	// 8 个世界坐标顶点（预计算，渲染线程做 world_to_screen）
 	std::array<vec3_t, 8> worldCorners;
+
+	// DamageModel 乘员/弹药部件盒（世界空间；Style 1 渲染：真实盒线框+远距兜底框）
+	std::vector<SPartBox> partBoxes;
 
 	// 速度（用于 aimbot 预测）
 	vec3_t velocity;
