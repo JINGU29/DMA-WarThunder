@@ -5,6 +5,7 @@
 #include <vector>
 #include <cmath>
 #include <chrono>
+#include <unordered_map>
 
 #include "..\..\game\datatypes\game_data.hpp"
 #include "..\..\game\datatypes\matrix.hpp"
@@ -34,7 +35,8 @@ namespace misc
 	inline bool bBallisticPrediction = true;
 
 	// 判断是否为有效敌人
-	inline auto is_valid_enemy( uint16_t unitState, uint8_t team ) -> bool
+	// flags: unit+0x90 的 4 字节（m_UnitFlags1-4）；unitType: unit+0x8C（0=飞机/无人机, 3=地面载具）
+	inline auto is_valid_enemy( uint16_t unitState, uint8_t team, uint32_t flags = 0, uint8_t unitType = 0 ) -> bool
 	{
 		if ( unitState >= 2 )
 			return false;
@@ -44,6 +46,42 @@ namespace misc
 
 		const uint8_t local_team = sdk::cLocalPlayer->getLocalUnit( ).getTeam( );
 		if ( team == local_team )
+			return false;
+
+		// 陆战残骸/未激活实体过滤（log_2026-10-04_14-17-15 验证）：
+		// type=3 载具被击毁后，游戏会在原位生成 flags=0x0844000C 的残骸实体（state=0、位置有效，
+		// 能通过其他所有过滤 → 表现为“重生残留框”）；玩家重生前的未激活实体同样带 0x08000000 位。
+		// 实体被复用为活体时 flags 会恢复正常（0x0044xxxx），不会永久漏敌。
+		// ⚠飞机/无人机(type=0)的 0x08000000 是常态位（F/A-18C 正常显示时就是 0x08441000），不能过滤！
+		if ( unitType == 3 && ( flags & 0x08000000u ) )
+			return false;
+
+		// 无敌实体过滤（grump 帖 hackedhacker 验证：if (unit.UnitFlags & 4) continue;）：
+		// bit2 覆盖三类垃圾实体——残骸(0x...0C)、出生区未出动载具(0x...04)、静止侦察无人机(0x00040004)；
+		// 所有活体载具低字节仅为 0x00/0x08，绝不含 bit2（log_2026-10-04_14-35 全量验证）。
+		// 这也等价于 grump 说的“护盾(重生保护)时长>15s 过滤”——长期无敌的正是这些实体。
+		if ( flags & 0x4u )
+			return false;
+
+		// 空中单位残骸/未激活过滤（米-35P 案例）：活体飞机/直升机 flags 低16位必含 0x1000 位
+		// （F/A-18C: 0x08441000/0x08441400/0x08441C08；米-35P 活体: 0x08441008/0x08441C08/0x08443C08）；
+		// 而直升机残骸(0x0844000C)和出生区未出动载具(0x00440004)均无此位。
+		// ⚠仅适用于 type=0：坦克活体可无 0x1000（如 BMP-2 的 0x00440408），不能对 type=3 用！
+		if ( unitType == 0 && ( flags & 0x1000u ) == 0 )
+			return false;
+
+		// 侦察无人机等虚假实体过滤（log_2026-10-04_14-02 / 14-17 / 14-35 三局验证）：
+		// “微型侦察无人机”= 地图固定侦察点（整局静止）+ 敌方玩家放出的侦察无人机消耗品（缓慢移动、无敌），
+		// 表现为“对局中不存在却一直显示、全程无敌”。其 flags 为 0x0004xxxx / 0x8004xxxx；
+		// 而所有真实可控单位（坦克/飞机/直升机，含未激活/残骸态）flags 第三字节均为 0x44/0x84/0x88
+		// 即必含 0x00400000 位 —— 缺此位即无人机类实体，过滤。
+		// （grump 帖建议按“护盾(重生保护)时长>15s”过滤，但该字段无现成偏移量；此位规律等价且已双局验证）
+		if ( ( flags & 0x00400000u ) == 0 )
+			return false;
+
+		// unitType 白名单（grump hackedhacker 过滤系统）：0=飞机/直升机/无人机, 3=地面载具, 5=合法类型；
+		// type=8 为地图静态/AI 单位（Phase 0 探测确认），其余未知类型一律过滤
+		if ( unitType != 0 && unitType != 3 && unitType != 5 )
 			return false;
 
 		return true;
@@ -210,6 +248,7 @@ struct UnitReadBuffer
 		uint8_t reloadTime;
 		uintptr_t groundMovement;
 		uint32_t flags; // unit + 0x90 起 4 字节（m_UnitFlags1-4），0x800 位疑似可见标志
+		uint8_t unitType; // unit + 0x8C（m_UnitType），Phase 0 探测：第三方 0/3/5 过滤依据
 	};
 
 		std::vector<UnitReadBuffer> buffers( numUnits );
@@ -226,6 +265,7 @@ struct UnitReadBuffer
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::visualReload_offset ), &buffers[i].reloadTime, sizeof( uint8_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::groundmovement_offset ), &buffers[i].groundMovement, sizeof( uintptr_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitFlags1_offset ), &buffers[i].flags, sizeof( uint32_t ) );
+		TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitType_offset ), &buffers[i].unitType, sizeof( uint8_t ) );
 		}
 
 		if ( !TargetProcess->ExecuteReadScatter( hScatter, 0, true ) )
@@ -256,12 +296,16 @@ struct UnitReadBuffer
 		// 构建 SImGuiUnit 列表
 		for ( size_t i = 0; i < numUnits; i++ )
 		{
-			// 跳过无效敌人
-			if ( !is_valid_enemy( buffers[i].unitState, buffers[i].team ) )
+			// 跳过无效敌人（含 type=3 残骸过滤）
+			if ( !is_valid_enemy( buffers[i].unitState, buffers[i].team, buffers[i].flags, buffers[i].unitType ) )
 				continue;
 
 			// 跳过空位置
 			if ( buffers[i].position.empty( ) )
+				continue;
+
+			// 跳过空槽位/回收中的内存（flags 全 F，第三方观察到的瞬变状态）
+			if ( buffers[i].flags == 0xFFFFFFFFu )
 				continue;
 
 			SImGuiUnit unit;
@@ -288,7 +332,11 @@ struct UnitReadBuffer
 								unit.vehicleName.erase( pos, 3 );
 						}
 
-						// 过滤防空炮/火炮：中文客户端单位名为"防空炮"(E9 98 B2 E7 A9 BA)、"火炮"(E7 81 AB E7 82 AE)，陆战/空战均不显示
+						// 过滤游戏内部测试单位（地图原点的 dummy，会显示为 28km 外的假敌框）
+					if ( unit.vehicleName == "dummy" )
+						continue;
+
+					// 过滤防空炮/火炮：中文客户端单位名为"防空炮"(E9 98 B2 E7 A9 BA)、"火炮"(E7 81 AB E7 82 AE)，陆战/空战均不显示
 						// 用字节转义避免源文件编码问题
 						if ( unit.vehicleName.find( "\xE9\x98\xB2\xE7\xA9\xBA" ) != std::string::npos )
 							continue;
@@ -303,6 +351,7 @@ struct UnitReadBuffer
 			unit.rotation = buffers[i].rotation;
 			unit.team = buffers[i].team;
 			unit.unitState = buffers[i].unitState;
+			unit.unitType = buffers[i].unitType;
 			unit.reloadTime = buffers[i].reloadTime;
 
 			// 目标速度：unit+0x2100 是"地面运动容器"指针（第三方 2.59.0.44 验证），
@@ -380,6 +429,132 @@ struct UnitReadBuffer
 			unit.worldCorners[7] = { pos.x + rx1.x + fy1.x + uz1.x, pos.y + rx1.y + fy1.y + uz1.y, pos.z + rx1.z + fy1.z + uz1.z };
 
 				computedData.units.push_back( std::move( unit ) );
+		}
+
+		// --- Phase 0 探测日志 v3（5 秒一次）：unitAddr 身份跟踪 + 消失原因 + 重生标记 ---
+		// 1) 显示中敌人：带 addr / 名字 / type / flags / state
+		// 2) 消失检测：上一轮显示过、本轮不在显示列表 → 回原始 buffers 输出当前数据与被过滤原因
+		// 3) 重生检测：新 addr 出现且名字曾在其他 addr 上出现过 → 标记 RESPAWN?
+		{
+			static auto s_lastProbe = std::chrono::steady_clock::now( );
+			static std::unordered_map<uintptr_t, std::string> s_unitNames;  // addr -> 上次已知名字
+			static std::unordered_map<uintptr_t, uint32_t> s_lastFlags;     // addr -> 上次 flags（仅显示过的）
+			static std::unordered_map<uintptr_t, std::string> s_goneReason; // addr -> 消失原因（dead/fog/wreck/removed）
+			if ( std::chrono::duration_cast<std::chrono::seconds>( std::chrono::steady_clock::now( ) - s_lastProbe ).count( ) >= 5 )
+			{
+				s_lastProbe = std::chrono::steady_clock::now( );
+
+				std::unordered_map<uintptr_t, bool> curDisplayed;
+				LOG( "[Probe] === displayed: %d / raw: %d ===\n",
+					static_cast<int>( computedData.units.size( ) ), static_cast<int>( numUnits ) );
+				size_t shown = 0;
+				for ( const auto& u : computedData.units )
+				{
+					curDisplayed[u.unitAddr] = true;
+					if ( shown++ >= 15 )
+					{
+						LOG( "[Probe] ... (%d more)\n", static_cast<int>( computedData.units.size( ) - 15 ) );
+						break;
+					}
+					// 重生/迷雾重现/残骸复用检测：新 addr + 名字曾在其他 addr 出现
+					// 旧 addr 因 state>=2 消失 → RESPAWN?（玩家重生，游戏重建实体）
+					// 旧 addr 因迷雾消失 → FOG-RETURN（服务器恢复下发，实体换地址重建）
+					// 新实体本身是无敌态（残骸 bit2 / 未激活）→ WRECK-REUSE（击毁点残骸换地址复现）
+					char respawnTag[96] = "";
+					if ( s_unitNames.find( u.unitAddr ) == s_unitNames.end( ) && !u.vehicleName.empty( ) )
+					{
+						const bool newIsWreck = ( u.unitFlags & 0x4u ) != 0
+							|| ( u.unitType == 0 && ( u.unitFlags & 0x1000u ) == 0 )
+							|| ( u.unitType == 3 && ( u.unitFlags & 0x08000000u ) != 0 );
+						if ( newIsWreck )
+							snprintf( respawnTag, sizeof( respawnTag ), "  <<< WRECK-REUSE (invincible 0x%08X)", u.unitFlags );
+						else
+						{
+						for ( const auto& kv : s_unitNames )
+						{
+							if ( kv.first != u.unitAddr && kv.second == u.vehicleName && !curDisplayed.count( kv.first ) )
+							{
+								const auto gr = s_goneReason.find( kv.first );
+								const bool wasDead = ( gr != s_goneReason.end( ) && gr->second.rfind( "dead", 0 ) == 0 );
+								snprintf( respawnTag, sizeof( respawnTag ),
+									wasDead ? "  <<< RESPAWN? (old %llX dead)" : "  <<< FOG-RETURN (old %llX fogged)",
+									static_cast<unsigned long long>( kv.first ) );
+								break;
+							}
+						}
+						}
+					}
+					LOG( "[Probe] %llX %-16s type=%d flags=0x%08X state=%d team=%d %4.0fm pos=(%.0f,%.0f,%.0f)%s\n",
+						static_cast<unsigned long long>( u.unitAddr ),
+						u.vehicleName.empty( ) ? "<noname>" : u.vehicleName.c_str( ),
+						u.unitType, u.unitFlags, u.unitState, u.team, u.distance,
+						u.worldOrigin.x, u.worldOrigin.y, u.worldOrigin.z,
+						respawnTag );
+					if ( !u.vehicleName.empty( ) )
+						s_unitNames[u.unitAddr] = u.vehicleName;
+				}
+
+				// 消失检测：上轮显示过、本轮不在 → 原始列表中找它，输出被过滤原因
+				for ( const auto& kv : s_lastFlags )
+				{
+					const uintptr_t addr = kv.first;
+					if ( curDisplayed.count( addr ) )
+						continue;
+					UnitReadBuffer* buf = nullptr;
+					for ( size_t k = 0; k < numUnits; ++k )
+						if ( validUnits[k] == addr ) { buf = &buffers[k]; break; }
+					const std::string nm = s_unitNames.count( addr ) ? s_unitNames[addr] : "<unknown>";
+					if ( buf )
+					{
+						const uint8_t localTeam = sdk::cLocalPlayer->getLocalUnit( ).getTeam( );
+					char reason[96];
+					if ( buf->flags == 0xFFFFFFFFu )
+						snprintf( reason, sizeof( reason ), "slot-reset" );
+					else if ( buf->unitState >= 2 )
+						snprintf( reason, sizeof( reason ), "dead-state=%d", buf->unitState );
+					else if ( buf->flags & 0x4u )
+						snprintf( reason, sizeof( reason ), "invincible-0x%08X", buf->flags );
+					else if ( buf->unitType == 3 && ( buf->flags & 0x08000000u ) )
+						snprintf( reason, sizeof( reason ), "wreck-0x%08X", buf->flags );
+					else if ( buf->unitType == 0 && ( buf->flags & 0x1000u ) == 0 )
+						snprintf( reason, sizeof( reason ), "air-inactive-0x%08X", buf->flags );
+					else if ( ( buf->flags & 0x00400000u ) == 0 )
+						snprintf( reason, sizeof( reason ), "uav-0x%08X", buf->flags );
+					else if ( buf->unitType != 0 && buf->unitType != 3 && buf->unitType != 5 )
+						snprintf( reason, sizeof( reason ), "type=%d-skip", buf->unitType );
+					else if ( buf->team == 0 || buf->team == localTeam )
+						snprintf( reason, sizeof( reason ), "team=%d(local=%d)", buf->team, localTeam );
+					else if ( buf->position.empty( ) )
+						snprintf( reason, sizeof( reason ), "fog-pos-empty" );
+					else
+						snprintf( reason, sizeof( reason ), "name-filter" );
+					s_goneReason[addr] = reason;
+					LOG( "[Probe] GONE %llX %-16s flags=0x%08X(was 0x%08X) type=%d state=%d team=%d pos=(%.0f,%.0f,%.0f) by:%s\n",
+							static_cast<unsigned long long>( addr ), nm.c_str( ),
+							buf->flags, kv.second, buf->unitType, buf->unitState, buf->team,
+							buf->position.x, buf->position.y, buf->position.z, reason );
+					}
+				else
+				{
+					s_goneReason[addr] = "removed-from-list";
+					LOG( "[Probe] GONE %llX %-16s (removed from unit list)\n",
+						static_cast<unsigned long long>( addr ), nm.c_str( ) );
+				}
+				}
+
+				// s_lastFlags 只保留本轮显示的
+				{
+					std::unordered_map<uintptr_t, uint32_t> keep;
+					for ( const auto& u : computedData.units )
+						keep[u.unitAddr] = u.unitFlags;
+					s_lastFlags.swap( keep );
+				}
+				if ( s_unitNames.size( ) > 512 )
+				{
+					s_unitNames.clear( );
+					s_goneReason.clear( );
+				}
+			}
 		}
 
 		computedData.bIsValid = true;

@@ -37,6 +37,8 @@ struct SImGuiUnit
 
 	// 单位标志位（unit + 0x90 起 4 字节，m_UnitFlags1-4）
 	uint32_t unitFlags = 0;
+	// 单位类型（unit + 0x8C，m_UnitType），Phase 0 探测用
+	uint8_t unitType = 0;
 	// 可见性（数据线程计算，渲染线程着色用）：可见=true 被遮挡=false
 	bool bVisible = true;
 
