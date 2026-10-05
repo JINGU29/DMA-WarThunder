@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "..\features\misc\misc.hpp"
 
@@ -39,6 +39,18 @@ namespace GUI
 			ImGui::TextColored( ImVec4( 0.31f, 0.86f, 0.35f, 1.0f ), "Green = Fuel" );
 			ImGui::SameLine( );
 			ImGui::TextColored( ImVec4( 1.0f, 0.86f, 0.24f, 1.0f ), "Yellow = Breech" );
+
+			ImGui::Separator( );
+
+			// 弹丸轨迹渲染（Phase C）：高初速炮弹/导弹拖尾点，机枪弹幕按速度门限裁剪
+
+			ImGui::Separator( );
+
+			// 导弹/炸弹追踪 + 导弹 CCIP（查询选择器链，offsets::missiles）
+			ImGui::Checkbox( "Missile Warn", &misc::bMissileWarn );
+			ImGui::TextColored( ImVec4( 1.0f, 0.3f, 0.3f, 1.0f ), "Red = enemy missile + name" );
+			ImGui::TextColored( ImVec4( 0.4f, 1.0f, 0.4f, 1.0f ), "Green = own missile" );
+			ImGui::TextColored( ImVec4( 1.0f, 0.4f, 1.0f, 1.0f ), "Magenta pipper = missile CCIP" );
 
 		}
 		ImGui::End( );

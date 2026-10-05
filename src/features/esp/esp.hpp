@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <mutex>
 #include <array>
@@ -169,6 +169,53 @@ namespace esp
             if ( g_render->world_to_screen( renderData.bombImpactPoint, screen_position, camera_matrix ) )
                 g_render->circle( screen_position.x, screen_position.y, 6.0f, IM_COL32( 255, 0, 200, 255 ), 16 );
         }
+
+        // 飞机模式：导弹 CCIP 落点（ballistics 容器 +0x1C9C 候选）
+        if ( renderData.bLocalIsPlane && renderData.bHasRocketImpact )
+        {
+            vec2_t pip;
+            if ( g_render->world_to_screen( renderData.rocketImpactPoint, pip, camera_matrix ) )
+            {
+                g_render->circle( pip.x, pip.y, 8.0f, IM_COL32( 255, 60, 255, 255 ), 24 );
+                g_render->line( pip.x - 12, pip.y, pip.x + 12, pip.y, IM_COL32( 255, 60, 255, 220 ), 1.5f );
+                g_render->line( pip.x, pip.y - 12, pip.x, pip.y + 12, IM_COL32( 255, 60, 255, 220 ), 1.5f );
+            }
+        }
+
+        // ── 导弹/炸弹追踪：红=来袭(敌) 绿=己方，名字 + 距离 + 1.5s 弹道线 ──
+        if ( misc::bMissileWarn && !renderData.missiles.empty( ) )
+        {
+            for ( const auto& m : renderData.missiles )
+            {
+                vec2_t ms;
+                if ( !g_render->world_to_screen( m.position, ms, camera_matrix ) )
+                    continue;
+
+                const ImU32 col = m.own ? IM_COL32( 80, 255, 80, 255 ) : IM_COL32( 255, 60, 60, 255 );
+
+                // 弹道线：1.5s 速度投影（导弹转向中也能看出趋势）
+                const vec3_t ahead = m.position + m.velocity * 1.5f;
+                vec2_t as;
+                if ( g_render->world_to_screen( ahead, as, camera_matrix ) )
+                    g_render->line( ms.x, ms.y, as.x, as.y, col, 2.0f );
+
+                // 菱形标记
+                g_render->filled_rect( ms.x - 3, ms.y - 3, 6, 6, col, 0, 0 );
+                g_render->rect( ms.x - 6, ms.y - 6, 12, 12, col, 1.5f );
+
+                // 名字 + 距离（名称解析失败时显示类型）
+                char mlabel[ 96 ];
+                const char* kind = m.isBomb ? "BOMB" : "MSL";
+                if ( !m.name.empty( ) )
+                    snprintf( mlabel, sizeof( mlabel ), "%s %.0fm", m.name.c_str( ), m.distance );
+                else
+                    snprintf( mlabel, sizeof( mlabel ), "%s%s %.0fm", m.own ? "[own] " : "", kind, m.distance );
+                g_render->text( { ms.x + 10, ms.y - 6 },
+                    m.own ? IM_COL32( 80, 255, 80, 255 ) : IM_COL32( 255, 90, 90, 255 ), 1, mlabel,
+                    g_render->fonts( ).m_esp );
+            }
+        }
+
 
         // 遍历预计算的 unit 数据进行渲染
         int totalUnits   = static_cast<int>(renderData.units.size());
