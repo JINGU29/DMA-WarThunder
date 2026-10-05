@@ -182,9 +182,10 @@ namespace esp
             }
         }
 
-        // ── 导弹/炸弹追踪：红=来袭(敌) 绿=己方，名字 + 距离 + 1.5s 弹道线 ──
+        // ── 导弹/炸弹追踪：红=来袭(敌) 绿=己方，名字 + 距离 + 1.5s 弹道线 + 锁定目标连线 ──
         if ( misc::bMissileWarn && !renderData.missiles.empty( ) )
         {
+            int incomingLocked = 0;
             for ( const auto& m : renderData.missiles )
             {
                 vec2_t ms;
@@ -202,6 +203,8 @@ namespace esp
                 // 菱形标记
                 g_render->filled_rect( ms.x - 3, ms.y - 3, 6, 6, col, 0, 0 );
                 g_render->rect( ms.x - 6, ms.y - 6, 12, 12, col, 1.5f );
+                if ( !m.own && m.isLocked && m.targetIsLocal )
+                    ++incomingLocked;
 
                 // 名字 + 距离（名称解析失败时显示类型）
                 char mlabel[ 96 ];
@@ -213,6 +216,26 @@ namespace esp
                 g_render->text( { ms.x + 10, ms.y - 6 },
                     m.own ? IM_COL32( 80, 255, 80, 255 ) : IM_COL32( 255, 90, 90, 255 ), 1, mlabel,
                     g_render->fonts( ).m_esp );
+
+                // 锁定目标：弹→目标连线 + 目标名（本地目标红/他人橙）
+                if ( m.hasTarget )
+                {
+                    vec2_t ts;
+                    if ( g_render->world_to_screen( m.targetPos, ts, camera_matrix ) )
+                        g_render->line( ms.x, ms.y, ts.x, ts.y,
+                            m.targetIsLocal ? IM_COL32( 255, 40, 40, 220 ) : IM_COL32( 255, 150, 40, 180 ), 1.4f );
+                }
+            }
+
+            // 来袭预警大字
+            if ( incomingLocked > 0 )
+            {
+                const ImVec2 dsz = ImGui::GetIO( ).DisplaySize;
+                char warn[ 64 ];
+                snprintf( warn, sizeof( warn ), "!! MISSILE INCOMING x%d !!", incomingLocked );
+                const ImVec2 tsz = ImGui::CalcTextSize( warn );
+                g_render->text( { dsz.x * 0.5f - tsz.x * 0.5f, 36.0f },
+                    IM_COL32( 255, 40, 40, 255 ), 2, warn, g_render->fonts( ).m_esp );
             }
         }
 

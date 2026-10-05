@@ -652,6 +652,7 @@ namespace misc
 
 		// 名字缓存：projectile 指针 → 武器名（跨帧稳定，省 ReadString 开销）
 		inline std::unordered_map<uintptr_t, std::string> g_nameCache;
+		inline std::unordered_map<uintptr_t, std::string> g_targetNameCache;   // 被锁定目标名字缓存(按单位指针)
 
 		// 单选择器枚举：返回本选择器下活弹体指针列表
 		inline auto enumerate_selector( uintptr_t selector_ptr_rva, std::vector<uintptr_t>& out, const char* tag ) -> void
@@ -760,7 +761,8 @@ namespace misc
 		}
 
 		// 主入口：枚举导弹+炸弹 → 过滤 → 填充 data.missiles；顺带读导弹 CCIP 落点
-		inline auto execute_pass( SGameData& data, const vec3_t& localPos, uintptr_t myUnit ) -> void
+	inline auto execute_pass( SGameData& data, const vec3_t& localPos, uintptr_t myUnit,
+		const std::unordered_map< int16_t, uintptr_t >& unitIdxMap ) -> void
 		{
 			namespace om = offsets::missiles;
 
@@ -769,6 +771,7 @@ namespace misc
 			std::vector< uintptr_t > bombs;
 			enumerate_selector( offsets::globals::bomb_list_index_ptr, bombs, "bomb" );
 			g_traced = true;
+			const int16_t myUnitIndex = ( myUnit > 0x10000 ) ? TargetProcess->Read<int16_t>( myUnit + offsets::unit_offsets::unitIndex_offset ) : -1;
 
 			auto fill = [ & ]( uintptr_t pa, bool isBomb ) -> void
 			{
@@ -799,6 +802,61 @@ namespace misc
 				m.isBomb = isBomb;
 				m.own = own;
 				m.projAddr = pa;
+
+				// 制导信息：GuidancePtr → isLocked/isTracking/TargetUnitId（2.59 候选偏移 0x648，健全性检查）
+				const uintptr_t guidance = TargetProcess->Read<uintptr_t>( pa + om::proj_guidance );
+				if ( guidance > 0x10000 )
+				{
+					uint8_t g[ 0x90 ];
+					if ( TargetProcess->Read( guidance, g, sizeof( g ) ) )
+					{
+						const uint8_t locked = g[ om::guid_isLocked ];
+						const uint8_t tracking = g[ om::guid_isTracking ];
+						if ( locked <= 1 && tracking <= 1 )
+						{
+							m.isLocked = locked != 0;
+							m.isTracking = tracking != 0;
+							int16_t tid = 0;
+							memcpy( &tid, g + om::guid_target_id, sizeof( tid ) );
+							m.targetUnitId = tid;
+							if ( tid == myUnitIndex )
+							{
+								m.hasTarget = true;
+								m.targetIsLocal = true;
+								m.targetName = "YOU";
+								m.targetPos = localPos;
+							}
+							else
+							{
+								auto ui = unitIdxMap.find( tid );
+								if ( ui != unitIdxMap.end( ) )
+								{
+									m.hasTarget = true;
+									const uintptr_t tAddr = ui->second;
+									vec3_t tpos{};
+									if ( TargetProcess->Read( tAddr + offsets::unit_offsets::position_offset,
+										&tpos, sizeof( tpos ) ) )
+										m.targetPos = tpos;
+									auto tn = g_targetNameCache.find( tAddr );
+									if ( tn == g_targetNameCache.end( ) )
+									{
+										const uintptr_t info = TargetProcess->Read<uintptr_t>(
+											tAddr + offsets::unit_offsets::info_offset );
+										std::string tnm;
+										if ( info > 0x10000 )
+										{
+											const uintptr_t namePtr = TargetProcess->Read<uintptr_t>( info + 0x28 );
+											if ( namePtr > 0x10000 )
+												tnm = TargetProcess->ReadString( namePtr, 96 );
+										}
+										tn = g_targetNameCache.emplace( tAddr, std::move( tnm ) ).first;
+									}
+									m.targetName = tn->second;
+								}
+							}
+						}
+					}
+				}
 
 				// 名字：NameCont → 文本偏移（导弹 +0x50 / 炸弹 +0x10），缓存按弹体指针
 				auto it = g_nameCache.find( pa );
@@ -990,6 +1048,7 @@ struct UnitReadBuffer
 		uintptr_t groundMovement;
 		uint32_t flags; // unit + 0x90 起 4 字节（m_UnitFlags1-4），0x800 位疑似可见标志
 		uint8_t unitType; // unit + 0x8C（m_UnitType），Phase 0 探测：第三方 0/3/5 过滤依据
+		int16_t unitIndex; // unit + 0x8（int16）——导弹制导目标反查键
 	};
 
 		std::vector<UnitReadBuffer> buffers( numUnits );
@@ -1006,6 +1065,7 @@ struct UnitReadBuffer
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::visualReload_offset ), &buffers[i].reloadTime, sizeof( uint8_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::groundmovement_offset ), &buffers[i].groundMovement, sizeof( uintptr_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitFlags1_offset ), &buffers[i].flags, sizeof( uint32_t ) );
+			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitIndex_offset ), &buffers[i].unitIndex, sizeof( int16_t ) );
 		TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitType_offset ), &buffers[i].unitType, sizeof( uint8_t ) );
 		}
 
@@ -1045,7 +1105,11 @@ struct UnitReadBuffer
 		// 导弹/炸弹查询链 + 导弹 CCIP 落点（offsets::missiles；选择器→子列表→active[i]→projectile）
 		{
 			const uintptr_t myUnit = TargetProcess->Read<uintptr_t>( baseAddr + offsets::globals::my_unit );
-			missile_pass::execute_pass( computedData, local_position, myUnit );
+			// 全量单位索引映射（含队友/本地）：导弹制导 TargetUnitId 反查用
+			std::unordered_map< int16_t, uintptr_t > unitIdxMap;
+			for ( size_t k = 0; k < validUnits.size( ); ++k )
+				unitIdxMap[ buffers[ k ].unitIndex ] = validUnits[ k ];
+			missile_pass::execute_pass( computedData, local_position, myUnit, unitIdxMap );
 		}
 
 		// 读取本地玩家是否为飞机
@@ -1120,6 +1184,7 @@ struct UnitReadBuffer
 			unit.team = buffers[i].team;
 			unit.unitState = buffers[i].unitState;
 			unit.unitType = buffers[i].unitType;
+			unit.unitIndex = buffers[i].unitIndex;
 			unit.reloadTime = buffers[i].reloadTime;
 
 			// 目标速度：unit+0x2100 是"地面运动容器"指针（第三方 2.59.0.44 验证），

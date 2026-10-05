@@ -202,4 +202,48 @@ namespace offsets
 		constexpr uint32_t  max_shift       = 12;     // shift=log2(容量) 上限保护（实测 64 槽 chunk → 6）
 		constexpr uint32_t  max_bullets     = 256;    // 单帧弹丸读取上限（实测真炮弹并发 <100）
 	}
+
+	// ── 导弹/炸弹查询链（2.57.1.111 社区逆向 + 2.59.0.44 用户探针实测；与 bullet 链同源 EntityManager）──
+	// 选择器 = [base + globals::rocket/bomb_list_index_ptr] & 0xFFFFFF（查询选择器，非计数/数组指针）
+	// indexData = [EM + 0x5E8] + selector*0x40：
+	//   +0x00 必需组件数  +0x01 可选组件数  +0x02 子列表数
+	//   +0x04 子列表偏移内联(≤9 个)      +0x08 >9 时外部偏移数组指针
+	//   +0x18 组件偏移矩阵（总数 >16 时为指针）：[0]=弹体列偏移 [1]=active 列偏移
+	// 每子列表：listData = [EM+0x178] + listOffset*0x20（布局同 bullet chunk 条目：
+	//   +0x00=storage 基址 +0x08=活条数 +0x0C=shift）
+	//   projectileColumn = storage + (compOff[0]<<shift)（指针数组 8B/条）
+	//   activeColumn     = storage + (compOff[1]<<shift)（u8/条）
+	//   active[i]==1 → projectile = [projectileColumn + i*8]
+	// Projectile 字段：+0x2C8 pos(vec3)  +0x2E4 vel(vec3)  +0x48 owner(unit)
+	//   导弹 +0x6E8 → NameCont（+0x50 名字文本）  炸弹 +0x6E0 → NameCont（+0x10 名字文本）
+	namespace missiles
+	{
+		constexpr uintptr_t em_index_table   = 0x5E8;     // [EM+0x5E8] 索引表指针
+		constexpr uint32_t  selector_mask    = 0xFFFFFF;
+		constexpr uintptr_t idx_required     = 0x00;
+		constexpr uintptr_t idx_sublists     = 0x02;
+		constexpr uintptr_t idx_inline_offs  = 0x04;      // 子列表偏移内联区（≤9 个）
+		constexpr uintptr_t idx_ext_offs     = 0x08;      // >9 时外部偏移数组指针
+		constexpr uintptr_t idx_comp_matrix  = 0x18;      // 组件偏移矩阵（[0]=弹体列 [1]=active 列）
+		constexpr uintptr_t proj_pos         = 0x2C8;     // vec3 世界坐标
+		constexpr uintptr_t proj_vel         = 0x2E4;     // vec3 速度
+		constexpr uintptr_t proj_owner       = 0x48;      // owner unit 指针
+		constexpr uintptr_t proj_namecont_ms = 0x6E8;     // 导弹名字容器指针
+		constexpr uintptr_t proj_namecont_bomb = 0x6E0;   // 炸弹名字容器指针
+		constexpr uintptr_t namecont_text_ms = 0x50;      // 名字文本偏移（导弹）
+		constexpr uintptr_t namecont_text_bomb = 0x10;    // 名字文本偏移（炸弹）
+
+		// 制导结构（GuidancePtr；2.57 社区源 0x648 候选——其版本 Position@0x1D0 与我们 0x2C8 不同但
+		// cleanname 0x6E8 与我们一致，0x648 处于合理区间；2.59 待验，TRACE 首次 dump 原始字节可校准）
+		constexpr uintptr_t proj_guidance   = 0x648;      // → Guidance 结构指针
+		constexpr uintptr_t guid_isLocked   = 0x50;       // u8 0/1
+		constexpr uintptr_t guid_isTracking = 0x51;       // u8
+		constexpr uintptr_t guid_target_id  = 0x8C;       // s16 目标单位 UnitIndex（对比 unit+0x8）
+
+		// ballistics 容器内导弹 CCIP 落点（c_game+0x3F0 → +0x1C9C，候选值源自 2.57 源，2.59 待校验）
+		constexpr uintptr_t rocket_impact_point = 0x1C9C;
+
+		constexpr uint32_t  max_missiles    = 16;
+		constexpr uintptr_t max_shift       = 12;
+	}
 }

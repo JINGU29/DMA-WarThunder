@@ -57,6 +57,8 @@ struct SImGuiUnit
 	uint32_t unitFlags = 0;
 	// 单位类型（unit + 0x8C，m_UnitType），Phase 0 探测用
 	uint8_t unitType = 0;
+	// 单位索引（unit + 0x8，int16）——导弹制导 TargetUnitId 与此比对反查锁定目标
+	int16_t unitIndex = -1;
 	// 可见性（数据线程计算，渲染线程着色用）：可见=true 被遮挡=false
 	bool bVisible = true;
 
@@ -102,6 +104,28 @@ struct SImGuiBullet
 	float  distance = 0.0f; // 距本地玩家 3D 距离
 };
 
+// 在飞导弹/炸弹（数据线程写、渲染线程读；来源 EM 查询选择器链，offsets::missiles）
+struct SImGuiMissile
+{
+	vec3_t position;        // 世界坐标（projectile +0x2C8）
+	vec3_t velocity;        // m/s（projectile +0x2E4）
+	float  speed = 0.0f;
+	float  distance = 0.0f; // 距本地玩家 3D 距离
+	std::string name;       // 武器名（R-77-1 / Kh-38MT / GBU…；解析失败为空）
+	bool isBomb = false;    // true=炸弹（bomb 选择器） false=导弹（rocket 选择器）
+	bool own = false;       // owner == 本地玩家单位
+	uintptr_t projAddr = 0; // 弹体指针（跨帧稳定 source_id）
+
+	// 制导信息（Guidance 结构；2.59 候选偏移待验）
+	bool isLocked = false;      // guidance+0x50
+	bool isTracking = false;    // guidance+0x51
+	bool hasTarget = false;     // 目标反查成功（TargetUnitId 匹配到 units 列表中的单位）
+	int targetUnitId = -1;      // guidance+0x8C 原始 s16
+	bool targetIsLocal = false; // 目标 == 本地玩家单位（来袭警告）
+	std::string targetName;     // 被锁定单位名（反查成功时）
+	vec3_t targetPos;           // 被锁定单位位置（画弹→目标连线）
+};
+
 // 整局游戏共享数据（数据线程写、渲染线程读）
 struct SGameData
 {
@@ -128,4 +152,11 @@ struct SGameData
 
 	// 在飞弹丸（真炮弹）
 	std::vector<SImGuiBullet> bullets;
+
+	// 在飞导弹/炸弹（含名字与敌我归属）
+	std::vector<SImGuiMissile> missiles;
+
+	// 导弹 CCIP 落点（ballistics 容器 +0x1C9C 候选；飞机模式且读数有效时置位）
+	bool bHasRocketImpact = false;
+	vec3_t rocketImpactPoint;
 };
