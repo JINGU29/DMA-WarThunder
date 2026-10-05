@@ -124,6 +124,7 @@ struct SImGuiMissile
 	bool targetIsLocal = false; // 目标 == 本地玩家单位（来袭警告）
 	std::string targetName;     // 被锁定单位名（反查成功时）
 	vec3_t targetPos;           // 被锁定单位位置（画弹→目标连线）
+	std::chrono::steady_clock::time_point sampleTime; // 数据采样时刻（渲染外推用）
 };
 
 // 整局游戏共享数据（数据线程写、渲染线程读）

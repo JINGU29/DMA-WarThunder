@@ -49,6 +49,7 @@ namespace misc
 
 	// 导弹/炸弹追踪渲染（查询选择器链，offsets::missiles）：敌我分色 + 名字 + 弹道
 	inline bool bMissileWarn = true;
+	inline bool bMissileOwnOnly = false;  // 方案 A 暂关：2.59 owner@0x48 不是 unit 指针（是数值 ID），待校准后开启
 
 	// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（网格束链，2026-10-04 实测；链详见 offsets::damage_model::mesh_bundle 注释）──
 	inline bool bPartMarkersCrew = true;   // 菜单开关：乘员部件标记（橙，Style 1 渲染）
@@ -648,252 +649,241 @@ namespace misc
 	// 可调（布局解释如与实测不符，一轮日志即可校正）。
 	namespace missile_pass
 	{
-		inline bool g_traced = false;   // 首次解析结构 dump 只打一次
-
-		// 名字缓存：projectile 指针 → 武器名（跨帧稳定，省 ReadString 开销）
-		inline std::unordered_map<uintptr_t, std::string> g_nameCache;
-		inline std::unordered_map<uintptr_t, std::string> g_targetNameCache;   // 被锁定目标名字缓存(按单位指针)
-
-		// 单选择器枚举：返回本选择器下活弹体指针列表
-		inline auto enumerate_selector( uintptr_t selector_ptr_rva, std::vector<uintptr_t>& out, const char* tag ) -> void
+		// ── 路线一：ECS 取坐标链（2.59 实测 ★★★，编年史 §2.7.2）──
+		// EM → 含 typeId 的 archetype（掩码位图判定）→ 活实体行 row →
+		// objptr = u64[ cb + 0x2c0 + row*0x10 ]（指针列 0x10/行）→
+		// 世界坐标 = [objptr + POS_OFF] f32 vec3
+		// 实测参数：rocket(tid=0x54, arch33, POS_OFF=+0x2C0) / bomb(tid=0x59, arch32, POS_OFF=+0x244)
+		// owner 探测：obj+0x48 与 myUnit 比对（方案 A 过滤依据，2.59 待用户复核）
+		struct STypeParam
 		{
-			namespace om = offsets::missiles;
-			const uintptr_t em = baseAddr + offsets::bullets::entity_manager;
+			uint16_t typeId;
+			uintptr_t posOff;
+			bool isBomb;
+		};
 
-			const uintptr_t selector = TargetProcess->Read<uintptr_t>( baseAddr + selector_ptr_rva ) & om::selector_mask;
-			if ( selector == 0 )
-				return;
-			const uintptr_t dataTable = TargetProcess->Read<uintptr_t>( em + offsets::bullets::em_chunk_desc );
-			const uintptr_t indexTable = TargetProcess->Read<uintptr_t>( em + om::em_index_table );
-			if ( dataTable < 0x10000 || indexTable < 0x10000 )
-				return;
+		inline std::unordered_map<uintptr_t, std::string> g_mslNameCache;   // obj 指针 → 武器名
+		inline std::unordered_map<uintptr_t, std::pair<vec3_t, std::chrono::steady_clock::time_point>> g_mslPrevPos; // 帧差分速度
 
-			const uintptr_t indexData = indexTable + ( selector << 6 );
-			uint8_t hdr[ 0x40 ];
-			if ( !TargetProcess->Read( indexData, hdr, sizeof( hdr ) ) )
-				return;
-
-			const uint32_t nReq  = hdr[ om::idx_required ];
-			const uint32_t nSub  = hdr[ om::idx_sublists ];
-			if ( nSub == 0 || nSub > 64 || ( nReq == 0 && nSub == 0 ) )
+		// 速度获取：优先 obj+0x480 探测，兜底帧差分
+		inline auto get_vel( uintptr_t objptr, const vec3_t& pos ) -> vec3_t
+		{
+			vec3_t vel{};
+			// ① 探测 obj+0x480（编年史 §2.7.2"移动 vec3 疑速度"）
+			vec3_t v480{};
+			if ( TargetProcess->Read( objptr + 0x480, &v480, sizeof( v480 ) ) )
 			{
-				TRACE("MP %s: selector=%llx indexData=%llx nReq=%u nSub=%u (empty)",
-					tag, (unsigned long long)selector, (unsigned long long)indexData, nReq, nSub);
-				return;
+				const float s = v480.length( );
+				if ( std::isfinite( s ) && s > 30.0f && s < 3000.0f )
+					return v480;
 			}
-			if ( !g_traced )
+			// ② 帧差分兜底
+			const auto now = std::chrono::steady_clock::now( );
+			auto it = g_mslPrevPos.find( objptr );
+			if ( it != g_mslPrevPos.end( ) )
 			{
-				TRACE("MP %s: indexData=%llx nReq=%u nOpt=%u nSub=%u hdr[4..0x18]=%02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x",
-					tag, (unsigned long long)indexData, nReq, hdr[1], nSub,
-					hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15]);
-			}
-
-			// 子列表偏移：≤9 内联在 +0x04（u32 数组），>9 时 +0x08 指向外部数组
-			uint32_t listOffs[ 64 ] = { 0 };
-			if ( nSub <= 9 )
-			{
-				memcpy( listOffs, hdr + om::idx_inline_offs, nSub * sizeof( uint32_t ) );
-			}
-			else
-			{
-				const uintptr_t ext = TargetProcess->Read<uintptr_t>( indexData + om::idx_ext_offs );
-				if ( ext < 0x10000 || !TargetProcess->Read( ext, listOffs, nSub * sizeof( uint32_t ) ) )
-					return;
-			}
-
-			// 组件偏移矩阵：+0x18；每子列表 [0]=弹体列偏移 [1]=active 列偏移（u16 对）
-			// 总数（nReq+nOpt）>16 时为外部指针，否则内联 u16 数组
-			const uint32_t totalComp = nReq + hdr[ 1 ];
-			uint16_t compOff[ 64 * 2 ] = { 0 };
-			if ( totalComp > 16 )
-			{
-				const uintptr_t matPtr = TargetProcess->Read<uintptr_t>( indexData + om::idx_comp_matrix );
-				if ( matPtr < 0x10000 || !TargetProcess->Read( matPtr, compOff, nSub * 2 * sizeof( uint16_t ) ) )
-					return;
-			}
-			else
-			{
-				memcpy( compOff, hdr + om::idx_comp_matrix, nSub * 2 * sizeof( uint16_t ) );
-			}
-
-			for ( uint32_t s = 0; s < nSub; ++s )
-			{
-				const uintptr_t listData = dataTable + static_cast<uintptr_t>( listOffs[ s ] ) * 0x20;
-				uint8_t ce[ 0x10 ];
-				if ( !TargetProcess->Read( listData, ce, sizeof( ce ) ) )
-					continue;
-				uint64_t storage = 0;
-				uint32_t count = 0;
-				memcpy( &storage, ce, sizeof( storage ) );
-				memcpy( &count, ce + 8, sizeof( count ) );
-				const uint8_t shift = ce[ 0xC ];
-				if ( storage < 0x10000 || count == 0 || shift > om::max_shift )
-					continue;
-				if ( count > ( 1u << shift ) )
-					continue;
-
-				const uintptr_t projCol = storage + ( static_cast<uint64_t>( compOff[ s * 2 ] ) << shift );
-				const uintptr_t actCol  = storage + ( static_cast<uint64_t>( compOff[ s * 2 + 1 ] ) << shift );
-				if ( projCol < 0x10000 || actCol < 0x10000 )
-					continue;
-
-				if ( !g_traced )
-					TRACE("MP %s: sub[%u] listOff=%u storage=%llx count=%u shift=%u projOff=%u actOff=%u",
-						tag, s, listOffs[s], (unsigned long long)storage, count, shift,
-						compOff[s*2], compOff[s*2+1]);
-
-				// active 列一次读入（u8/条），弹体指针列一次读入（8B/条）
-				if ( count > 256 )
-					count = 256;
-				std::vector< uint8_t > act( count );
-				std::vector< uint64_t > ptrs( count );
-				if ( !TargetProcess->Read( actCol, act.data( ), count ) )
-					continue;
-				if ( !TargetProcess->Read( projCol, ptrs.data( ), count * 8 ) )
-					continue;
-
-				for ( uint32_t i = 0; i < count; ++i )
+				const float dt = std::chrono::duration<float>( now - it->second.second ).count( );
+				if ( dt > 0.005f )
 				{
-					if ( act[ i ] == 1 && ptrs[ i ] > 0x10000 )
-						out.push_back( ptrs[ i ] );
+					const vec3_t raw = ( pos - it->second.first ) / dt;
+					if ( raw.length( ) < 3000.0f )
+						vel = raw;
 				}
 			}
+			return vel;
 		}
 
-		// 主入口：枚举导弹+炸弹 → 过滤 → 填充 data.missiles；顺带读导弹 CCIP 落点
-	inline auto execute_pass( SGameData& data, const vec3_t& localPos, uintptr_t myUnit,
-		const std::unordered_map< int16_t, uintptr_t >& unitIdxMap ) -> void
+		// 帧差分状态更新（在 pos 读取后调用）
+		inline auto update_prev( uintptr_t objptr, const vec3_t& pos ) -> void
+		{
+			g_mslPrevPos[ objptr ] = { pos, std::chrono::steady_clock::now( ) };
+			if ( g_mslPrevPos.size( ) > 256 )
+				g_mslPrevPos.clear( );
+		}
+
+		// 在 archetype 元数据表中找含 tid 的 archetype，走 slot/偏移链拿 chunk 头
+		inline auto resolve_chunk = []( uint16_t tid, uintptr_t& cb, uint32_t& count, uint8_t& shift ) -> bool
+		{
+			namespace ob = offsets::bullets;
+			const uintptr_t em = baseAddr + ob::entity_manager;
+			const uintptr_t archMeta = TargetProcess->Read<uintptr_t>( em + ob::em_arch_meta );
+			const uintptr_t prefixTbl = TargetProcess->Read<uintptr_t>( em + ob::em_prefix_table );
+			const uintptr_t offTbl = TargetProcess->Read<uintptr_t>( em + ob::em_offset_table );
+			if ( archMeta < 0x10000 )
+				return false;
+
+			for ( uint32_t ai = 0; ai < 128; ++ai )
+			{
+				uint8_t meta[ 0x10 ];
+				if ( !TargetProcess->Read( archMeta + static_cast<uintptr_t>( ai ) * 0x10, meta, sizeof( meta ) ) )
+					break;
+				uint64_t maskPtr = 0;
+				uint16_t cs = 0, ce = 0;
+				memcpy( &maskPtr, meta, sizeof( maskPtr ) );
+				memcpy( &cs, meta + 8, sizeof( cs ) );
+				memcpy( &ce, meta + 10, sizeof( ce ) );
+				if ( maskPtr < 0x10000 || !( cs <= tid && tid < ce ) )
+					continue;
+
+				const uint32_t ci = tid - cs;
+				uint64_t maskQ = 0;
+				if ( !TargetProcess->Read( maskPtr + static_cast<uintptr_t>( ci >> 5 ) * 8, &maskQ, sizeof( maskQ ) ) )
+					continue;
+				if ( !( ( maskQ >> ( ci & 31u ) ) & 1u ) )
+					continue;
+
+				// slot 走链 → compOff → chunk 头（同 bullet 链公式③）
+				const uint32_t below = static_cast<uint32_t>( maskQ ) & ( ( 1u << ( ci & 31u ) ) - 1u );
+				uint32_t n = below, pc = 0;
+				while ( n ) { n &= n - 1; ++pc; }
+				uint32_t slot = pc + static_cast<uint32_t>( maskQ >> 32 ) + 1u;
+				uint32_t prefix = 0;
+				if ( prefixTbl >= 0x10000 )
+					TargetProcess->Read( prefixTbl + static_cast<uintptr_t>( ai ) * 4, &prefix, sizeof( prefix ) );
+				slot += prefix;
+
+				uint16_t compOff = 0;
+				if ( offTbl < 0x10000
+					|| !TargetProcess->Read( offTbl + static_cast<uintptr_t>( slot ) * 2, &compOff, sizeof( compOff ) ) )
+					continue;
+
+				// chunk 描述符 = [EM+0x178] + ai*0x20（sel0）
+				const uintptr_t descArr = TargetProcess->Read<uintptr_t>( em + ob::em_chunk_desc );
+				if ( descArr < 0x10000 )
+					continue;
+				uint8_t d0[ 0x20 ];
+				uintptr_t desc = descArr + static_cast<uintptr_t>( ai ) * 0x20;
+				if ( !TargetProcess->Read( desc, d0, sizeof( d0 ) ) )
+					continue;
+				if ( d0[ 0xF ] != 0 )
+				{
+					uintptr_t ind = 0;
+					memcpy( &ind, d0, sizeof( ind ) );
+					if ( ind < 0x10000 )
+						continue;
+					desc = ind;
+				}
+				uint8_t cent[ 0x10 ];
+				if ( !TargetProcess->Read( desc, cent, sizeof( cent ) ) )
+					continue;
+				memcpy( &cb, cent, sizeof( cb ) );
+				memcpy( &count, cent + 8, sizeof( count ) );
+				shift = cent[ 0xC ];
+				return cb > 0x10000 && count > 0 && shift > 0 && shift <= 12;
+			}
+			return false;
+		};
+
+		// 主入口：双类型枚举 → owner 过滤 → data.missiles
+		inline auto execute_pass( SGameData& data, const vec3_t& localPos, uintptr_t myUnit,
+			const std::unordered_map< int16_t, uintptr_t >& unitIdxMap ) -> void
 		{
 			namespace om = offsets::missiles;
+			data.missiles.clear( );
+			data.bHasRocketImpact = false;
 
-			std::vector< uintptr_t > projs;
-			enumerate_selector( offsets::globals::rocket_list_index_ptr, projs, "rkt" );
-			std::vector< uintptr_t > bombs;
-			enumerate_selector( offsets::globals::bomb_list_index_ptr, bombs, "bomb" );
-			g_traced = true;
-			const int16_t myUnitIndex = ( myUnit > 0x10000 ) ? TargetProcess->Read<int16_t>( myUnit + offsets::unit_offsets::unitIndex_offset ) : -1;
-
-			auto fill = [ & ]( uintptr_t pa, bool isBomb ) -> void
-			{
-				if ( data.missiles.size( ) >= om::max_missiles )
-					return;
-				// 弹体字段：pos/vel/owner
-				uint8_t blk[ 0x10 ];
-				if ( !TargetProcess->Read( pa + om::proj_pos, blk, sizeof( blk ) ) )
-					return;
-				vec3_t pos = *reinterpret_cast< vec3_t* >( blk );
-				vec3_t vel = *reinterpret_cast< vec3_t* >( blk + 0xC );
-				const float sp = vel.length( );
-				if ( !std::isfinite( sp ) || !std::isfinite( pos.x ) || !std::isfinite( pos.y ) || !std::isfinite( pos.z ) )
-					return;
-				if ( sp < 20.0f || sp > 4000.0f )
-					return;   // 静止挂架/假阳性初滤
-				if ( pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f )
-					return;
-
-				const uintptr_t owner = TargetProcess->Read<uintptr_t>( pa + om::proj_owner );
-				const bool own = ( owner != 0 && owner == myUnit );
-
-				SImGuiMissile m;
-				m.position = pos;
-				m.velocity = vel;
-				m.speed = sp;
-				m.distance = ( pos - localPos ).length( );
-				m.isBomb = isBomb;
-				m.own = own;
-				m.projAddr = pa;
-
-				// 制导信息：GuidancePtr → isLocked/isTracking/TargetUnitId（2.59 候选偏移 0x648，健全性检查）
-				const uintptr_t guidance = TargetProcess->Read<uintptr_t>( pa + om::proj_guidance );
-				if ( guidance > 0x10000 )
-				{
-					uint8_t g[ 0x90 ];
-					if ( TargetProcess->Read( guidance, g, sizeof( g ) ) )
-					{
-						const uint8_t locked = g[ om::guid_isLocked ];
-						const uint8_t tracking = g[ om::guid_isTracking ];
-						if ( locked <= 1 && tracking <= 1 )
-						{
-							m.isLocked = locked != 0;
-							m.isTracking = tracking != 0;
-							int16_t tid = 0;
-							memcpy( &tid, g + om::guid_target_id, sizeof( tid ) );
-							m.targetUnitId = tid;
-							if ( tid == myUnitIndex )
-							{
-								m.hasTarget = true;
-								m.targetIsLocal = true;
-								m.targetName = "YOU";
-								m.targetPos = localPos;
-							}
-							else
-							{
-								auto ui = unitIdxMap.find( tid );
-								if ( ui != unitIdxMap.end( ) )
-								{
-									m.hasTarget = true;
-									const uintptr_t tAddr = ui->second;
-									vec3_t tpos{};
-									if ( TargetProcess->Read( tAddr + offsets::unit_offsets::position_offset,
-										&tpos, sizeof( tpos ) ) )
-										m.targetPos = tpos;
-									auto tn = g_targetNameCache.find( tAddr );
-									if ( tn == g_targetNameCache.end( ) )
-									{
-										const uintptr_t info = TargetProcess->Read<uintptr_t>(
-											tAddr + offsets::unit_offsets::info_offset );
-										std::string tnm;
-										if ( info > 0x10000 )
-										{
-											const uintptr_t namePtr = TargetProcess->Read<uintptr_t>( info + 0x28 );
-											if ( namePtr > 0x10000 )
-												tnm = TargetProcess->ReadString( namePtr, 96 );
-										}
-										tn = g_targetNameCache.emplace( tAddr, std::move( tnm ) ).first;
-									}
-									m.targetName = tn->second;
-								}
-							}
-						}
-					}
-				}
-
-				// 名字：NameCont → 文本偏移（导弹 +0x50 / 炸弹 +0x10），缓存按弹体指针
-				auto it = g_nameCache.find( pa );
-				if ( it == g_nameCache.end( ) )
-				{
-					const uintptr_t namecont_rva = isBomb ? om::proj_namecont_bomb : om::proj_namecont_ms;
-					const uintptr_t text_rva = isBomb ? om::namecont_text_bomb : om::namecont_text_ms;
-					const uintptr_t nc = TargetProcess->Read<uintptr_t>( pa + namecont_rva );
-					std::string nm;
-					if ( nc > 0x10000 )
-						nm = TargetProcess->ReadString( nc + text_rva, 96 );
-					it = g_nameCache.emplace( pa, std::move( nm ) ).first;
-				}
-				m.name = it->second;
-
-				data.missiles.push_back( std::move( m ) );
+			const STypeParam types[ 2 ] = {
+				{ 0x54, 0x2C0, false },   // rocket：arch33 实测 POS_OFF=+0x2C0
+				{ 0x59, 0x244, true },    // bomb：arch32 实测 POS_OFF=+0x244
 			};
 
-			for ( uintptr_t pa : projs )
-				fill( pa, false );
-			for ( uintptr_t pa : bombs )
-				fill( pa, true );
+			const int16_t myUnitIndex = ( myUnit > 0x10000 )
+				? TargetProcess->Read<int16_t>( myUnit + offsets::unit_offsets::unitIndex_offset ) : -1;
 
-			// 名字缓存防涨（弹体指针随对局变化）
-			if ( g_nameCache.size( ) > 512 )
-				g_nameCache.clear( );
+			for ( const auto& tp : types )
+			{
+				uintptr_t cb = 0;
+				uint32_t count = 0;
+				uint8_t shift = 0;
+				if ( !resolve_chunk( tp.typeId, cb, count, shift ) )
+					continue;
+				if ( count > om::max_missiles )
+					count = om::max_missiles;
 
-			// 导弹 CCIP 落点：ballistics 容器 +0x1C9C（候选偏移，飞机模式且数值有效时置位）
-			data.bHasRocketImpact = false;
+				// 指针列一次平坦读：cb+0x2c0 起，每行 0x10 字节取首个 qword
+				const uintptr_t ptrCol = cb + 0x2C0;
+				const size_t readSz = static_cast<size_t>( count ) * 0x10;
+				std::vector<uint8_t> pbuf( readSz );
+				if ( !TargetProcess->Read( ptrCol, pbuf.data( ), readSz ) )
+					continue;
+
+				for ( uint32_t row = 0; row < count; ++row )
+				{
+					uint64_t objptr = 0;
+					memcpy( &objptr, pbuf.data( ) + static_cast<size_t>( row ) * 0x10, sizeof( objptr ) );
+					if ( objptr < 0x10000 || objptr > 0x7FFFFFFFFFFF )
+						continue;
+
+					vec3_t pos{};
+					if ( !TargetProcess->Read( objptr + tp.posOff, &pos, sizeof( pos ) ) )
+						continue;
+					if ( !std::isfinite( pos.x ) || !std::isfinite( pos.y ) || !std::isfinite( pos.z ) )
+						continue;
+					if ( pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f )
+						continue;
+					if ( fabs( pos.x ) > 60000.0f || fabs( pos.y ) > 60000.0f || fabs( pos.z ) > 60000.0f )
+						continue;
+
+					// owner 探测：obj+0x48 与 myUnit 比对（方案 A 过滤依据，2.59 待复核——首次打日志）
+					uint64_t owner = 0;
+					TargetProcess->Read( objptr + 0x48, &owner, sizeof( owner ) );
+					const bool own = ( owner != 0 && owner == myUnit );
+					static int s_ownerLogCount = 0;
+					if ( s_ownerLogCount < 8 )
+					{
+						TRACE("MSL tid=%x row=%u obj=%llx owner=%llx myUnit=%llx own=%d pos=(%.0f,%.0f,%.0f)",
+							tp.typeId, row, (unsigned long long)objptr, (unsigned long long)owner,
+							(unsigned long long)myUnit, (int)own, pos.x, pos.y, pos.z);
+						++s_ownerLogCount;
+					}
+
+					// 方案 A：只标自己发射的（菜单可关看全部）
+					if ( misc::bMissileOwnOnly && !own )
+						continue;
+
+					SImGuiMissile m;
+					m.position = pos;
+					m.velocity = {};   // Route 1 无直接 vel 字段——由渲染端 pos 差分或后续验证 obj+0x480
+					m.speed = 0.0f;
+					m.velocity = get_vel( objptr, pos );
+					update_prev( objptr, pos );
+					m.sampleTime = std::chrono::steady_clock::now( );
+					m.speed = m.velocity.length( );
+					m.distance = ( pos - localPos ).length( );
+					m.isBomb = tp.isBomb;
+					m.own = own;
+					m.projAddr = objptr;
+
+					// 名字：尝试 NameCont 链（若 ECS obj 与 Projectile 同体则命中，否则空名降级）
+					auto nit = g_mslNameCache.find( objptr );
+					if ( nit == g_mslNameCache.end( ) )
+					{
+						const uintptr_t ncrva = tp.isBomb ? om::proj_namecont_bomb : om::proj_namecont_ms;
+						const uintptr_t txrva = tp.isBomb ? om::namecont_text_bomb : om::namecont_text_ms;
+						const uintptr_t nc = TargetProcess->Read<uintptr_t>( objptr + ncrva );
+						std::string nm;
+						if ( nc > 0x10000 )
+							nm = TargetProcess->ReadString( nc + txrva, 96 );
+						nit = g_mslNameCache.emplace( objptr, std::move( nm ) ).first;
+					}
+					m.name = nit->second;
+
+					data.missiles.push_back( std::move( m ) );
+				}
+			}
+
+			if ( g_mslNameCache.size( ) > 512 )
+				g_mslNameCache.clear( );
+
+			// 导弹 CCIP 落点：ballistics 容器 +0x1C9C（候选，飞机模式）
 			if ( data.bLocalIsPlane )
 			{
-				const uintptr_t ballistics_cont = TargetProcess->Read<uintptr_t>(
+				const uintptr_t bc = TargetProcess->Read<uintptr_t>(
 					data.gameCtx.cGame + offsets::cgame_offsets::ballistic_offsets::ballistics_ptr );
-				if ( ballistics_cont > 0x10000 )
+				if ( bc > 0x10000 )
 				{
 					vec3_t imp{};
-					if ( TargetProcess->Read( ballistics_cont + om::rocket_impact_point, &imp, sizeof( imp ) )
+					if ( TargetProcess->Read( bc + offsets::missiles::rocket_impact_point, &imp, sizeof( imp ) )
 						&& std::isfinite( imp.x ) && std::isfinite( imp.y ) && std::isfinite( imp.z )
 						&& fabs( imp.x ) < 50000.0f && fabs( imp.y ) < 50000.0f && fabs( imp.z ) < 50000.0f )
 					{

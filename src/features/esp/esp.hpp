@@ -188,17 +188,22 @@ namespace esp
             int incomingLocked = 0;
             for ( const auto& m : renderData.missiles )
             {
+                    // 渲染线程外推：renderPos = samplePos + vel * (renderNow - sampleTime)
+                    const auto renderNow = std::chrono::steady_clock::now( );
+                    const float age = std::chrono::duration<float>( renderNow - m.sampleTime ).count( );
+                    const vec3_t renderPos = m.position + m.velocity * age;
                 vec2_t ms;
-                if ( !g_render->world_to_screen( m.position, ms, camera_matrix ) )
+                if ( !g_render->world_to_screen( renderPos, ms, camera_matrix ) )
                     continue;
 
                 const ImU32 col = m.own ? IM_COL32( 80, 255, 80, 255 ) : IM_COL32( 255, 60, 60, 255 );
 
-                // 弹道线：1.5s 速度投影（导弹转向中也能看出趋势）
-                const vec3_t ahead = m.position + m.velocity * 1.5f;
+
+                // 短弹道线：0.5s 速度投影（只标方向不画长线）
+                const vec3_t ahead = renderPos + m.velocity * 0.5f;
                 vec2_t as;
                 if ( g_render->world_to_screen( ahead, as, camera_matrix ) )
-                    g_render->line( ms.x, ms.y, as.x, as.y, col, 2.0f );
+                    g_render->line( ms.x, ms.y, as.x, as.y, col, 1.5f );
 
                 // 菱形标记
                 g_render->filled_rect( ms.x - 3, ms.y - 3, 6, 6, col, 0, 0 );
@@ -355,7 +360,8 @@ namespace esp
             }
 
 			// 弹道预测绘制：末端红色方框标预测命中点（提前量+下坠补偿后的位置）
-			if ( misc::bBallisticPrediction && unit.bHasAimPoint )
+			// 飞机模式下不画（飞机用炸弹落点紫圈/导弹 CCIP 洋红圈，不需要地面预测框）
+			if ( misc::bBallisticPrediction && unit.bHasAimPoint && !renderData.bLocalIsPlane )
 			{
 				++drawnPred;
 				vec2_t aimScreen;
