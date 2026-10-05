@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <mutex>
 #include <array>
@@ -33,6 +33,9 @@ namespace misc
 
 	// 弹道预测开关（提前量 + 下坠补偿，陆战坦克为主）
 	inline bool bBallisticPrediction = true;
+
+	// 弹丸追踪开关（在飞真炮弹；链路 docs/弹丸追踪-逆向编年史.md，Phase C 轨迹渲染数据源）
+	inline bool bBulletTracer = true;
 
 	// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（网格束链，2026-10-04 实测；链详见 offsets::damage_model::mesh_bundle 注释）──
 	inline bool bPartMarkersCrew = true;   // 菜单开关：乘员部件标记（橙，Style 1 渲染）
@@ -126,8 +129,18 @@ namespace misc
 		const uintptr_t dnet = TargetProcess->Read<uintptr_t>( unitAddr + offsets::unit_offsets::damageModelCont_offset );
 		if ( !dnet )
 			return false;
-		if ( TargetProcess->Read<uintptr_t>( dnet + mb::backref_off ) != unitAddr )	// 反指校验防误读
-			return false;
+		const uintptr_t backref = TargetProcess->Read<uintptr_t>( dnet + mb::backref_off );
+		if ( backref != unitAddr )	// 反指校验防误读（本地场景恒成立；联机被改写为网络侧指针）
+		{
+			// 联机对局实测（2026-10-05）：联机时反指≠unitAddr，但 dnet+0x20 'DNET' 魔数、
+			// 下游 obj/hdr 与本地同型车完全一致（如 T-90A loop=290）。故反指不符时以魔数兜底，
+			// 魔数也不符才判误读拒绝（可拦截 0xDEADBEEF 毒值与半初始化残槽）。
+			uint32_t magic = 0;
+			if ( !( dnet > 0x10000
+				&& TargetProcess->Read( dnet + mb::dnet_tag_off, &magic, sizeof( magic ) )
+				&& magic == mb::dnet_magic ) )
+				return false;
+		}
 		const uintptr_t obj = TargetProcess->Read<uintptr_t>( dnet + mb::obj_off );
 		if ( !obj )
 			return false;
@@ -258,8 +271,10 @@ namespace misc
 					breechList += mesh.names[k] + " ";
 				}
 			}
-			LOG( "[MESH] unit=0x%llX parts=%u crew=%d ammo=%d fuel=%d breech=%d maxTdelta=%.4f fetch#%d\n[MESH]   crew: %s\n[MESH]   ammo: %s\n[MESH]   fuel: %s\n[MESH]   breech: %s\n",
-				static_cast<unsigned long long>( unitAddr ), loop, crewN, ammoN, fuelN, breechN, maxTDelta, mesh.fetchCount,
+			LOG( "[MESH] unit=0x%llX parts=%u dnet=0x%llX obj=0x%llX hdr=0x%llX crew=%d ammo=%d fuel=%d breech=%d maxTdelta=%.4f fetch#%d\n[MESH]   crew: %s\n[MESH]   ammo: %s\n[MESH]   fuel: %s\n[MESH]   breech: %s\n",
+				static_cast<unsigned long long>( unitAddr ), loop,
+				static_cast<unsigned long long>( dnet ), static_cast<unsigned long long>( obj ), static_cast<unsigned long long>( hdr ),
+				crewN, ammoN, fuelN, breechN, maxTDelta, mesh.fetchCount,
 				crewList.c_str( ), ammoList.c_str( ), fuelList.c_str( ), breechList.c_str( ) );
 			mesh.logged = true;
 		}
@@ -358,6 +373,263 @@ namespace misc
 		return true;
 	}
 
+	// ── 弹丸追踪数据通道（ECS bullet_component；公式/过滤规则见 docs/弹丸追踪-逆向编年史.md §2.2/2.3/§3.1）──
+	// 铁律：记录区请求并入 GameUpdate 既有 scatter 句柄（同一次 Execute，绝不开新句柄）；
+	//       只读平坦字段（vel/pos），不做指针追逐；地址先过合理闸。
+	namespace bullet_pass
+	{
+		// 运行时解析一次的静态链（typeId → bullet archetype → compOff；版本内不变，失败 2s 节流重试）
+		struct SChain
+		{
+			bool     valid = false;
+			uint16_t typeId = 0;
+			uint32_t archIdx = 0;
+			uint16_t compOff = 0;
+		};
+		inline SChain g_chain;
+		inline std::chrono::steady_clock::time_point g_chainNextTry{};
+
+		// 记录读取缓冲（scatter 落点：一次 0x1C 字节 = vel@+0x124(12) + pos@+0x130(12) + pad(4)）
+		struct SReadBuf
+		{
+			uint64_t row = 0;   // chunk 内记录序号
+			vec3_t   vel;
+			vec3_t   pos;
+			uint32_t pad = 0;
+		};
+
+		inline auto popcnt32( uint32_t v ) -> uint32_t
+		{
+			uint32_t n = 0;
+			while ( v ) { v &= v - 1; ++n; }
+			return n;
+		}
+
+		// 静态链解析（编年史 2.1 公式①②③）：哈希查 typeId → 掩码定位 archetype → 偏移表取 compOff
+		inline auto resolve_chain( ) -> bool
+		{
+			namespace ob = offsets::bullets;
+			auto& ch = g_chain;
+			ch.valid = false;
+
+			const uintptr_t em = baseAddr + ob::entity_manager;
+
+			// ① 组件哈希表：整表读一次（0x2000 覆盖 bucket 529 + 探测扩展区），找 comp_hash → typeId
+			uintptr_t hashTable = 0;
+			uint32_t mask = 0;
+			if ( !TargetProcess->Read( em + ob::em_hash_table, &hashTable, sizeof( hashTable ) )
+				|| !TargetProcess->Read( em + ob::em_hash_mask, &mask, sizeof( mask ) )
+				|| hashTable < 0x10000 || mask == 0 || mask > 0x1000000 )
+			{
+				TRACE("BP resolve: hash tbl/mask bad tbl=%llx mask=%x",
+					(unsigned long long)hashTable, mask);
+				return false;
+			}
+
+			uint8_t hbuf[ 0x2000 ];
+			if ( !TargetProcess->Read( hashTable, hbuf, sizeof( hbuf ) ) )
+			{
+				TRACE("BP resolve: hash read FAIL tbl=%llx", (unsigned long long)hashTable);
+				return false;
+			}
+
+			uint16_t typeId = 0xFFFF;
+			for ( uint32_t off = 0; off + 0xC <= sizeof( hbuf ); off += 0xC )
+			{
+				uint32_t h = 0;
+				memcpy( &h, hbuf + off + 4, sizeof( h ) );
+				if ( h == ob::comp_hash )
+				{
+					memcpy( &typeId, hbuf + off + 8, sizeof( typeId ) );
+					break;
+				}
+			}
+			if ( typeId == 0xFFFF )
+			{
+				TRACE("BP resolve: hash 0x%x NOT found in table %llx",
+					ob::comp_hash, (unsigned long long)hashTable);
+				return false;
+			}
+			TRACE("BP resolve: typeId=%u", typeId);
+
+			// ② archetype 元数据表：compStart≤typeId<compEnd 且掩码位置位（实测全表唯一）
+			uintptr_t archMeta = 0;
+			if ( !TargetProcess->Read( em + ob::em_arch_meta, &archMeta, sizeof( archMeta ) ) || archMeta < 0x10000 )
+				return false;
+
+			uintptr_t prefixTbl = 0, offTbl = 0;
+			TargetProcess->Read( em + ob::em_prefix_table, &prefixTbl, sizeof( prefixTbl ) );
+			TargetProcess->Read( em + ob::em_offset_table, &offTbl, sizeof( offTbl ) );
+
+			for ( uint32_t ai = 0; ai < 128; ++ai )
+			{
+				uint8_t meta[ 0x10 ];
+				if ( !TargetProcess->Read( archMeta + static_cast<uintptr_t>( ai ) * 0x10, meta, sizeof( meta ) ) )
+					break;
+				uint64_t maskPtr = 0;
+				uint16_t cs = 0, ce = 0;
+				memcpy( &maskPtr, meta, sizeof( maskPtr ) );
+				memcpy( &cs, meta + 8, sizeof( cs ) );
+				memcpy( &ce, meta + 10, sizeof( ce ) );
+				if ( maskPtr < 0x10000 || !( cs <= typeId && typeId < ce ) )
+					continue;
+
+				const uint32_t ci = typeId - cs;
+				uint64_t maskQ = 0;
+				if ( !TargetProcess->Read( maskPtr + static_cast<uintptr_t>( ci >> 5 ) * 8, &maskQ, sizeof( maskQ ) ) )
+					continue;
+				if ( !( ( maskQ >> ( ci & 31u ) ) & 1u ) )
+					continue;
+
+				// ③ slot = popcnt(低位) + (掩码qword>>32) + 1 + prefix[arch]；compOff = u16偏移表[slot]
+				const uint32_t below = static_cast<uint32_t>( maskQ ) & ( ( 1u << ( ci & 31u ) ) - 1u );
+				uint32_t slot = popcnt32( below ) + static_cast<uint32_t>( maskQ >> 32 ) + 1u;
+				uint32_t prefix = 0;
+				if ( prefixTbl >= 0x10000 )
+					TargetProcess->Read( prefixTbl + static_cast<uintptr_t>( ai ) * 4, &prefix, sizeof( prefix ) );
+				slot += prefix;
+
+				uint16_t compOff = 0;
+				if ( offTbl < 0x10000
+					|| !TargetProcess->Read( offTbl + static_cast<uintptr_t>( slot ) * 2, &compOff, sizeof( compOff ) ) )
+					continue;
+				if ( compOff == 0 || compOff > 0x1000 )
+					continue;
+
+				ch.typeId = typeId;
+				ch.archIdx = ai;
+				ch.compOff = compOff;
+				ch.valid = true;
+				TRACE("BP resolve OK: typeId=%u arch=%u compOff=%u", typeId, ai, compOff);
+				return true;
+			}
+			TRACE("BP resolve: no arch with bit (typeId=%u)", typeId);
+			return false;
+		}
+
+		// 阶段二：execute 后过滤（死槽/飞机/弹速闸）并填充 computedData.bullets
+		// 三类甄别（编年史 2.3）：死槽=全零/非有限；飞机=行寿命>30s 恒速；真炮弹=短寿命 650~930 m/s
+		inline auto collect( std::vector<SReadBuf>& bufs, uint64_t chunkBase, const vec3_t& localPos, SGameData& data ) -> void
+		{
+			static uint64_t s_chunk = 0;
+			static std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> s_rowSeen;
+			if ( s_chunk != chunkBase )   // chunk 重分配：行龄作废
+			{
+				s_chunk = chunkBase;
+				s_rowSeen.clear( );
+			}
+			const auto now = std::chrono::steady_clock::now( );
+
+			for ( const auto& b : bufs )
+			{
+				const float sp = b.vel.length( );
+				const bool finite = std::isfinite( sp ) && std::isfinite( b.pos.x )
+					&& std::isfinite( b.pos.y ) && std::isfinite( b.pos.z );
+				if ( !finite || sp < 1.0f || sp > 3000.0f
+					|| ( b.pos.x == 0.0f && b.pos.y == 0.0f && b.pos.z == 0.0f ) )
+				{
+					s_rowSeen.erase( b.row );   // 死槽：清行龄，行复用时重新计龄
+					continue;
+				}
+
+				// 行寿命 >30s = 持续移动的飞机（非弹道），过滤但保留行龄
+				auto& seen = s_rowSeen[ b.row ];
+				if ( seen == std::chrono::steady_clock::time_point{} )
+					seen = now;
+				if ( std::chrono::duration_cast<std::chrono::seconds>( now - seen ).count( ) > 30 )
+					continue;
+
+				SImGuiBullet bl;
+				bl.position = b.pos;
+				bl.velocity = b.vel;
+				bl.speed = sp;
+				bl.distance = ( b.pos - localPos ).length( );
+				data.bullets.push_back( std::move( bl ) );
+			}
+			TRACE("BP collect: in=%zu live=%zu", bufs.size( ), data.bullets.size( ));
+		}
+
+		// 读取弹丸记录：独立 scatter 句柄（崩溃教训见编年史 2.5：与单位 scatter 共享句柄触发
+		// VMMDLL 内部写越界 → ExecuteReadScatter GS cookie 失败 0xC0000409；弹丸量小(≤256 页)
+		// 自建自关，单位 scatter 主链保持零改动）。任何一步失败都静默跳过本帧。
+		inline auto execute_pass( SGameData& data, const vec3_t& localPos ) -> void
+		{
+			namespace ob = offsets::bullets;
+			const auto& ch = g_chain;
+			if ( !ch.valid )
+				return;
+
+			const uintptr_t em = baseAddr + ob::entity_manager;
+
+			// chunk 描述符：EM+0x178 数组按 archetypeIdx 索引，flag@0xF 非零则间接
+			uintptr_t descArr = 0;
+			if ( !TargetProcess->Read( em + ob::em_chunk_desc, &descArr, sizeof( descArr ) ) || descArr < 0x10000 )
+				return;
+
+			uint8_t d0[ 0x20 ];
+			uintptr_t desc = descArr + static_cast<uintptr_t>( ch.archIdx ) * 0x20;
+			if ( !TargetProcess->Read( desc, d0, sizeof( d0 ) ) )
+				return;
+			if ( d0[ 0xF ] != 0 )
+			{
+				uintptr_t ind = 0;
+				memcpy( &ind, d0, sizeof( ind ) );
+				if ( ind < 0x10000 )
+					return;
+				desc = ind;
+			}
+
+			// chunk 条目（sel=0 恒成立，实测）：+0x00=数据基址 +0x08=活记录数 +0x0C=shift
+			uint8_t ce[ 0x10 ];
+			if ( !TargetProcess->Read( desc, ce, sizeof( ce ) ) )
+			{
+				TRACE("BP exec: chunk read FAIL desc=%llx", (unsigned long long)desc);
+				return;
+			}
+			uint64_t chunkBase = 0;
+			uint32_t count = 0;
+			memcpy( &chunkBase, ce, sizeof( chunkBase ) );
+			memcpy( &count, ce + 8, sizeof( count ) );
+			const uint8_t shift = ce[ 0xC ];
+			TRACE("BP exec: chunk=%llx count=%u shift=%u",
+				(unsigned long long)chunkBase, count, shift);
+			// 严格校验：活记录数不可能超过 chunk 容量 2^shift；基址过合理闸
+			if ( chunkBase < 0x10000 || count == 0 || shift == 0 || shift > ob::max_shift )
+				return;
+			if ( count > ( 1u << shift ) )
+				return;
+			if ( count > ob::max_bullets )
+				count = ob::max_bullets;
+			const uintptr_t dataBase = chunkBase + ( static_cast<uint64_t>( ch.compOff ) << shift );
+			if ( dataBase < 0x10000 )
+				return;
+
+			// 单次平坦读整个记录区（count ≤ 2^shift，实测 64 槽 chunk → ≤24.5KB）。
+			// 不走 scatter——崩溃复盘 2.5：本环境 scatter 执行期 GS cookie 被砸（3/3 确定性复现，
+			// 独立句柄仍复现），改为零 scatter 的平坦读彻底绕开 VMMDLL_Scatter 路径。
+			const size_t readSz = static_cast<size_t>( count ) * ob::record_size;
+			std::vector<uint8_t> rbuf( readSz );
+			TRACE("BP exec: flat read %llx cb=%zx", (unsigned long long)dataBase, readSz);
+			if ( !TargetProcess->Read( dataBase, rbuf.data( ), readSz ) )
+			{
+				TRACE("BP exec: flat read FAIL");
+				return;
+			}
+			TRACE("BP exec: flat read ok, filtering");
+
+			std::vector<SReadBuf> bufs( count );
+			for ( uint32_t i = 0; i < count; ++i )
+			{
+				const uint8_t* rec = rbuf.data( ) + static_cast<size_t>( i ) * ob::record_size;
+				bufs[ i ].row = i;
+				memcpy( &bufs[ i ].vel, rec + ob::tracer_velocity, sizeof( vec3_t ) );
+				memcpy( &bufs[ i ].pos, rec + ob::tracer_position, sizeof( vec3_t ) );
+			}
+			collect( bufs, chunkBase, localPos, data );
+		}
+
+	}
+
 	// GameUpdate：数据线程主函数 —— 批量 scatter read + 预计算
 	inline auto GameUpdate( ) -> void
 	{
@@ -400,6 +672,7 @@ namespace misc
 			std::lock_guard<std::mutex> lock( g_gameMutex );
 			g_gameData.bIsValid = false;
 			g_gameData.units.clear( );
+			g_gameData.bullets.clear( );
 			return;
 		}
 
@@ -411,9 +684,15 @@ namespace misc
 		}
 
 		// --- 2. 获取游戏上下文 (cGame, cCamera, viewMatrix) ---
+		TRACE("GU enter state=%d", (int)gui_state);
 		SImGuiGame gameCtx;
 		if ( !ScatterGame( gameCtx ) )
+		{
+			TRACE("GU ScatterGame FAIL");
 			return;
+		}
+		TRACE("GU ctx ok cGame=%llx cCam=%llx",
+			(unsigned long long)gameCtx.cGame, (unsigned long long)gameCtx.cCamera);
 
 		computedData.gameCtx = gameCtx;
 
@@ -421,6 +700,7 @@ namespace misc
 		const int unit_count = sdk::cGame->getUnitCount( );
 		if ( !unit_count || unit_count > 10000 )
 		{
+			TRACE("GU count invalid=%d", unit_count);
 			std::lock_guard<std::mutex> lock( g_gameMutex );
 			g_gameData = computedData;
 			g_gameData.bIsValid = true;
@@ -429,7 +709,11 @@ namespace misc
 
 		const uintptr_t unit_list_base = sdk::cGame->getUnitList( );
 		if ( !unit_list_base )
+		{
+			TRACE("GU unit_list_base NULL");
 			return;
+		}
+		TRACE("GU count=%d list=%llx", unit_count, (unsigned long long)unit_list_base);
 
 		// --- 4. 全量 scatter read ---
 
@@ -444,8 +728,10 @@ namespace misc
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( unit_list_base + 0x8 * i ), &unitPtrs[i], sizeof( uintptr_t ) );
 		}
 
+		TRACE("GU p1 exec units=%d", unit_count);
 		if ( !TargetProcess->ExecuteReadScatter( hScatter, 0, true ) )
 		{
+			TRACE("GU p1 FAIL");
 			TargetProcess->CloseScatterHandle( hScatter );
 			return;
 		}
@@ -461,6 +747,7 @@ namespace misc
 
 		if ( validUnits.empty( ) )
 		{
+			TRACE("GU valid empty");
 			TargetProcess->CloseScatterHandle( hScatter );
 			std::lock_guard<std::mutex> lock( g_gameMutex );
 			computedData.bIsValid = true;
@@ -505,17 +792,38 @@ struct UnitReadBuffer
 		TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitType_offset ), &buffers[i].unitType, sizeof( uint8_t ) );
 		}
 
+		TRACE("GU p2 exec units=%zu (reqs=%zu)", numUnits, numUnits * 10);
 		if ( !TargetProcess->ExecuteReadScatter( hScatter, 0, true ) )
 		{
+			TRACE("GU p2 FAIL");
 			TargetProcess->CloseScatterHandle( hScatter );
 			return;
 		}
+		TRACE("GU p2 done");
 
 		TargetProcess->CloseScatterHandle( hScatter );
 
 		// --- 5. 预计算渲染数据 ---
 		const vec3_t local_position = sdk::cLocalPlayer->getLocalUnit( ).getPosition( );
 		computedData.localPosition = local_position;
+
+		// 弹丸追踪：独立流程（链解析 2s 节流重试 → chunk 头校验 → 平坦读记录 → 过滤）
+		if ( bBulletTracer )
+		{
+			auto& chain = bullet_pass::g_chain;
+			const auto nowB = std::chrono::steady_clock::now( );
+			TRACE("GU bullet: enter valid=%d", (int)chain.valid);
+			if ( !chain.valid && nowB >= bullet_pass::g_chainNextTry )
+			{
+				bullet_pass::g_chainNextTry = nowB + std::chrono::seconds( 2 );
+				if ( bullet_pass::resolve_chain( ) )
+					LOG( "[BULLET] chain resolved: typeId=%u arch=%u compOff=0x%X\n",
+						chain.typeId, chain.archIdx, chain.compOff );
+			}
+			if ( chain.valid )
+				bullet_pass::execute_pass( computedData, local_position );
+			TRACE("GU bullet: done live=%zu", computedData.bullets.size( ));
+		}
 
 		// 读取本地玩家是否为飞机
 		computedData.bLocalIsPlane = sdk::cLocalPlayer->getLocalUnit( ).getInfo( ).isPlane( );
@@ -892,12 +1200,24 @@ struct UnitReadBuffer
 						LOG( "BallisticPred: bVel=%.1f %s | <unknown> vel=%.2f(m/s)%s%s%s\n",
 							g_gameData.ballisticVelocity, distBuf, velMag, aimBuf, fTimeBuf, dropBuf );
 				}
-				else
-				{
-					LOG( "BallisticPred: bVel=%.1f nolocalunit\n", g_gameData.ballisticVelocity );
+					else
+					{
+						LOG( "BallisticPred: bVel=%.1f nolocalunit\n", g_gameData.ballisticVelocity );
+					}
+
+					// [BULLET] 弹丸追踪统计：数量 + 首条样本（Phase C 渲染数据验证用）
+					{
+						const auto& bl = g_gameData.bullets;
+						if ( !bl.empty( ) )
+						{
+							const auto& b0 = bl.front( );
+							LOG( "[BULLET] count=%d first pos=(%.0f,%.0f,%.0f) v=%.0f dist=%.0fm\n",
+								static_cast<int>( bl.size( ) ),
+								b0.position.x, b0.position.y, b0.position.z, b0.speed, b0.distance );
+						}
+					}
 				}
 			}
 		}
-	}
 
-}
+	}

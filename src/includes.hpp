@@ -78,6 +78,20 @@ inline auto get_timestamp_w( ) -> std::wstring
 		} \
 	} while( 0 )
 
+// TRACE：崩溃诊断专用 —— 每条即开即写即关 crash_trace.log（fastfail 绕过 SEH，缓冲日志会随进程一起死）
+// 用法同 printf；仅调试期使用，定位完成后移除调用点即可
+#define TRACE( fmt, ... ) \
+	do { \
+		FILE* _trace_fp = nullptr; \
+		if ( fopen_s( &_trace_fp, "crash_trace.log", "a" ) == 0 && _trace_fp ) { \
+			auto _tn = std::chrono::system_clock::now( ).time_since_epoch( ); \
+			auto _tms = std::chrono::duration_cast< std::chrono::milliseconds >( _tn ).count( ) % 100000000; \
+			fprintf( _trace_fp, "[%08lld] " fmt "\n", (long long)_tms, ##__VA_ARGS__ ); \
+			fflush( _trace_fp ); \
+			fclose( _trace_fp ); \
+		} \
+	} while( 0 )
+
 // 获取用于文件名的时间戳字符串 YYYY-MM-DD_HH-MM-SS
 inline auto get_file_timestamp( ) -> std::string
 {

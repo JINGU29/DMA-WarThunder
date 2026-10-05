@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <array>
@@ -89,6 +89,16 @@ struct SImGuiUnit
 	vec3_t aimPoint;
 };
 
+// 单发在飞弹丸（数据线程写、渲染线程读；来源 ECS bullet_component，链路见 docs/弹丸追踪-逆向编年史.md）
+// 采集端已过滤：死槽（全零/非有限值）、飞机（行寿命>30s 的恒速记录）
+struct SImGuiBullet
+{
+	vec3_t position;       // 世界坐标（tracer +0x130）
+	vec3_t velocity;       // m/s（tracer +0x124）
+	float  speed = 0.0f;   // |velocity|
+	float  distance = 0.0f; // 距本地玩家 3D 距离
+};
+
 // 整局游戏共享数据（数据线程写、渲染线程读）
 struct SGameData
 {
@@ -112,4 +122,7 @@ struct SGameData
 
 	// 单位列表
 	std::vector<SImGuiUnit> units;
+
+	// 在飞弹丸（真炮弹）
+	std::vector<SImGuiBullet> bullets;
 };

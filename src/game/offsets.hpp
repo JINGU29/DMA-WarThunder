@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 
@@ -152,7 +152,9 @@ namespace offsets
 	{
 		namespace mesh_bundle
 		{
-			constexpr uintptr_t backref_off      = 0x38;  // u64[dnet+0x38]==unitAddr 反指校验
+			constexpr uintptr_t backref_off      = 0x38;  // u64[dnet+0x38]==unitAddr 反指校验（本地场景恒成立；联机失效改走魔数）
+			constexpr uintptr_t dnet_tag_off     = 0x20;  // u32 'DNET' 魔数（联机时反指失效的替代校验，见 9.26）
+			constexpr uint32_t  dnet_magic       = 0x54454E44;  // 'DNET'（小端）
 			constexpr uintptr_t obj_off          = 0x58;  // dnet → obj
 			constexpr uintptr_t header_off       = 0x78;  // obj → header
 			constexpr uintptr_t hdr_rel_off      = 0x04;  // u32 部件表相对偏移
@@ -169,5 +171,35 @@ namespace offsets
 			constexpr uint32_t  max_parts        = 2048;  // loop 上限保护
 			constexpr uint32_t  max_name_size    = 0x100000;
 		}
+	}
+
+	// ── 弹丸追踪（live bullets，2026-10-05 实测定稿；公式与证据链详见 docs/弹丸追踪-逆向编年史.md）──
+	// ECS EntityManager（.bss 全局对象本体，非指针）→ 哈希表查 bullet_component(typeId) → 掩码定位
+	// bullet archetype → chunk 描述符取记录数组基址 → 0x3C0 步长记录：
+	//   record = chunk_base + (compOff << shift) + row * 0x3C0
+	//   +0x124 = vec3 速度(m/s)   +0x130 = vec3 位置(米)
+	// 实测：干净轨迹 |Δpos/dt| vs |vel| 误差 1.6%~4%；长寿命恒速记录是飞机、全零位是死槽（采集端过滤）。
+	namespace bullets
+	{
+		// EM 在模块内的 RVA（inline 允许 update.hpp 签名扫描运行时覆盖）
+		inline uintptr_t entity_manager = 0x7E64848;
+
+		constexpr uint32_t  comp_hash = 0xBC84D211;  // bullet_component 描述哈希（EM+0x260 哈希表键）
+		constexpr uint32_t  type_hash = 0xD5EFE099;  // 类型校验哈希（EM+0x278 表项高 32 位 = getter 第 4 参）
+
+		constexpr uintptr_t record_size     = 0x3C0;  // 单条弹丸记录大小（getter 第 5 参实测）
+		constexpr uintptr_t tracer_velocity = 0x124;  // vec3 速度 m/s
+		constexpr uintptr_t tracer_position = 0x130;  // vec3 位置（米）
+
+		// EM 内部字段（2.59.0.44 getter 全解实测；版本更新失效时按编年史 2.1 重导）
+		constexpr uintptr_t em_chunk_desc   = 0x178;  // chunk 描述符数组指针（0x20/条按 archetypeIdx 索引）
+		constexpr uintptr_t em_prefix_table = 0x180;  // 前缀表指针（u32/条按 archetypeIdx）
+		constexpr uintptr_t em_arch_meta    = 0x188;  // archetype 元数据表指针（0x10/条：+0=掩码表指针,+8=compStart,+A=compEnd）
+		constexpr uintptr_t em_offset_table = 0x210;  // 组件偏移表指针（u16/条按全局 slot 序号）
+		constexpr uintptr_t em_hash_table   = 0x260;  // 组件哈希表指针（0x0C/条：flag@0, hash@4, typeId@8）
+		constexpr uintptr_t em_hash_mask    = 0x268;  // 哈希掩码 u32（桶 = mask & comp_hash，线性探测步长 0xC）
+
+		constexpr uint32_t  max_shift       = 12;     // shift=log2(容量) 上限保护（实测 64 槽 chunk → 6）
+		constexpr uint32_t  max_bullets     = 256;    // 单帧弹丸读取上限（实测真炮弹并发 <100）
 	}
 }

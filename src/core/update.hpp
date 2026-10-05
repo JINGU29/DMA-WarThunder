@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // based on https://github.com/bditt/WarThunder-Offset-Dumper
 // 扩展：加入 9.17 伤害模型特征码，实现版本更新后自动重定位 DM 入口链等偏移
@@ -29,9 +29,15 @@ namespace update
     constexpr const char* sig_dm_get_hp   = "0F BF 02 0F 57 C0 39 41 50 76 4A 4C 8B 81 88 00 00 00 89 C2 4C 8D 0C 92";
     // dm_get_damage_part_props: 48 0F BF 02 89 C0 48 8D 04 80 48 C1 E0 02 48 03 81 88 00 00 00 C3 CC CC
     constexpr const char* sig_dm_get_props= "48 0F BF 02 89 C0 48 8D 04 80 48 C1 E0 02 48 03 81 88 00 00 00 C3 CC CC";
+    // 弹丸追踪 EM 全局（2026-10-05 编年史 §2.4）：bullet spawn 处 mov dword[rsp+X],0x3C0（记录大小）
+    //   + lea rcx,[EM] + lea r8,&desc + mov edx,entityId + mov r9d,0xD5EFE099（bullet typeHash）+ call getter(0x2c06b0)
+    // 本版 2 处命中且全部解析到同一 EM RVA（0x7E64848），解析式：EM = hit + 15 + disp32（disp32 @ hit+11）
+    // ⚠尾部必须带空格：FindSignature 对末尾 '?' token 的 pat[2] 越界判断依赖 "? \0" 排布（坑位 9）
+    constexpr const char* sig_bullets_em  = "C7 44 24 ? C0 03 00 00 48 8D 0D ? ? ? ? 4C 8D 44 24 ? 89 ? 41 B9 99 E0 EF D5 E8 ? ? ? ? ";
 
     // 版本字符串在 aces.exe 中的偏移（2.59.0.44 实测）
-    // 若版本变化，此偏移可能也需要调整，但 bditt 原版一直用这个
+    // 注意：游戏会用自定义打包器把模块尾部数据区（0x6000000+）动态映射/卸载，此 RVA 可能落进已卸载的
+    // 洞里（2026-10-05 实测 0x6631350 整页不可读）——读不到时用 scan_version_string 窗口扫描兜底
     constexpr uintptr_t version_string_rva = 0x6631350;
 
     // ── 解析 RIP 相对寻址 ──────────────────────────────────────
@@ -51,15 +57,55 @@ namespace update
         return target - baseAddr;
     }
 
+    // ── 布局指纹：对已存档签名命中点的原字节做 FNV-1a ──────────
+    // 游戏热更后这些位置的指令字节必然变化 → 指纹失配 → 自动重扫；
+    // 字节一致 → 偏移依然有效 → 直接加载缓存。比读版本串可靠（本版映像内无 ASCII 版本串）。
+    inline auto compute_fingerprint( const std::unordered_map<std::string, uintptr_t>& m ) -> uint64_t
+    {
+        uint64_t h = 0xcbf29ce484222325ULL;
+        auto mix = [ &h ]( const uint8_t* p, size_t n )
+        {
+            for ( size_t i = 0; i < n; ++i )
+            {
+                h ^= p[ i ];
+                h *= 0x100000001b3ULL;
+            }
+        };
+        // key 在文件里存的是 RVA；读不到/键缺失都参与混 hash（确定性）
+        auto site = [ & ]( const char* key, size_t n )
+        {
+            auto it = m.find( key );
+            if ( it == m.end( ) )
+            {
+                h ^= 0xFF; h *= 0x100000001b3ULL;
+                return;
+            }
+            uint8_t buf[ 64 ] = { 0 };
+            if ( it->second > 0x10000 && it->second < baseSize
+                && TargetProcess->Read( baseAddr + it->second, buf, n ) )
+                mix( buf, n );
+            else
+            {
+                h ^= 0xEE; h *= 0x100000001b3ULL;
+            }
+        };
+        site( "dm_entry", 14 );        // 48 8B 8E A8 10 00 00 B8 70 03 00 00 48 01 C1
+        site( "dm_get_hp", 26 );
+        site( "dm_get_props", 38 );
+        site( "bullets_em_sig", 33 );  // 弹丸 EM 签名命中点（代码区，稳定）；注意不能用 EM 对象地址（.bss 数据每帧变）
+        return h;
+    }
+
     // ── 写入 offsets 文件 ──────────────────────────────────────
-    inline auto write_offsets_file( const std::string& version, uintptr_t c_game_rva, uintptr_t c_local_rva,
-                                     uint64_t dm_entry_addr, uint64_t dm_get_hp_addr, uint64_t dm_get_props_addr ) -> void
+    inline auto write_offsets_file( uint64_t fingerprint, uintptr_t c_game_rva, uintptr_t c_local_rva,
+                                     uint64_t dm_entry_rva, uint64_t dm_get_hp_rva, uint64_t dm_get_props_rva,
+                                     uintptr_t bullets_em_rva, uintptr_t bullets_em_sig_rva ) -> void
     {
         std::ofstream outFile( "offsets", std::ios::trunc );
         if ( !outFile.is_open( ) )
             return;
 
-        outFile << version << std::endl;
+        outFile << "fingerprint: 0x" << std::hex << fingerprint << std::dec << std::endl;
 
         // 全局指针偏移（RVA）
         if ( c_game_rva < 0x100000 )
@@ -72,10 +118,14 @@ namespace update
         else
             outFile << "c_local: 0x" << std::hex << c_local_rva << std::dec << std::endl;
 
-        // DM 特征码命中地址（绝对地址，用于日志/验证）
-        outFile << "dm_entry: 0x" << std::hex << dm_entry_addr << std::dec << std::endl;
-        outFile << "dm_get_hp: 0x" << std::hex << dm_get_hp_addr << std::dec << std::endl;
-        outFile << "dm_get_props: 0x" << std::hex << dm_get_props_addr << std::dec << std::endl;
+        // DM / 弹丸签名命中点（RVA，供指纹校验与日志）
+        outFile << "dm_entry: 0x" << std::hex << dm_entry_rva << std::dec << std::endl;
+        outFile << "dm_get_hp: 0x" << std::hex << dm_get_hp_rva << std::dec << std::endl;
+        outFile << "dm_get_props: 0x" << std::hex << dm_get_props_rva << std::dec << std::endl;
+
+        // 弹丸追踪：EM 对象 RVA（业务用）+ 签名命中点 RVA（指纹用，代码区稳定）
+        outFile << "bullets_em: 0x" << std::hex << bullets_em_rva << std::dec << std::endl;
+        outFile << "bullets_em_sig: 0x" << std::hex << bullets_em_sig_rva << std::dec << std::endl;
 
         outFile.close( );
     }
@@ -89,9 +139,6 @@ namespace update
 
         std::string line;
         std::unordered_map<std::string, uintptr_t> offset_map;
-
-        // 跳过版本行
-        std::getline( file, line );
 
         while ( std::getline( file, line ) )
         {
@@ -125,9 +172,9 @@ namespace update
     }
 
     // ── 执行特征码扫描并写入 offsets 文件 ──────────────────────
-    inline auto do_scan( const std::string& version ) -> void
+    inline auto do_scan( ) -> void
     {
-        LOG( "[update] Starting signature scan for version %s...\n", version.c_str( ) );
+        LOG( "[update] Starting full signature scan...\n" );
 
         // c_game
         auto c_game_sig = TargetProcess->FindSignature( sig_c_game, baseAddr, baseAddr + baseSize );
@@ -177,8 +224,52 @@ namespace update
         else
             LOG( "[update] dm_get_damage_part_props @ 0x%llX (aces.exe+0x%llX)\n", dm_get_props, dm_get_props - baseAddr );
 
-        // 写入 offsets 文件
-        write_offsets_file( version, c_game_rva, c_local_rva, dm_entry, dm_get_hp, dm_get_props );
+        // 弹丸追踪：EM 全局（spawn 处 0x3C0 store + lea rcx,[EM] + typeHash + getter call）
+        auto bullets_em = TargetProcess->FindSignature( sig_bullets_em, baseAddr, baseAddr + baseSize );
+        uintptr_t bullets_em_rva = 0;
+        uintptr_t bullets_em_sig_rva = 0;   // 签名命中点 RVA（代码区，供指纹）；失败时置 0 走哨兵
+        if ( bullets_em < 0x100000 )
+        {
+            // 签名失败 → 沿用当前值（硬编码或上一轮文件值），保证业务不断供且指纹文件完整
+            bullets_em_rva = offsets::bullets::entity_manager;
+            LOG( "[update] bullets EM signature NOT found! Using current RVA 0x%llX.\n",
+                 (uint64_t)bullets_em_rva );
+        }
+        else
+        {
+            // lea rcx,[rip+disp32] @ hit+8（7 字节）：EM = hit + 15 + disp32，disp32 @ hit+11
+            const int32_t disp = TargetProcess->Read<int32_t>( bullets_em + 11 );
+            const uint64_t em = bullets_em + 15 + static_cast<uint64_t>( disp );
+            bullets_em_rva = static_cast<uintptr_t>( em - baseAddr );
+            if ( bullets_em_rva < 0x100000 || bullets_em_rva >= baseSize )
+            {
+                LOG( "[update] bullets EM sig resolve out of range (0x%llX), fallback hardcoded.\n",
+                     (uint64_t)bullets_em_rva );
+                bullets_em_rva = offsets::bullets::entity_manager;   // 回退，不写 0（0 会被文件加载覆盖业务值）
+            }
+            else
+            {
+                offsets::bullets::entity_manager = bullets_em_rva;
+                bullets_em_sig_rva = static_cast< uintptr_t >( bullets_em - baseAddr );
+                LOG( "[update] bullets EM sig @ 0x%llX, EM RVA = 0x%llX\n", bullets_em, (uint64_t)bullets_em_rva );
+            }
+        }
+
+        // 写入 offsets 文件（dm_*/bullets_em_sig 存 RVA；指纹 = 各签名命中点原字节 FNV-1a）
+        auto to_rva = [ & ]( uint64_t addr ) -> uintptr_t
+        {
+            return ( addr >= 0x100000 && addr >= baseAddr ) ? static_cast< uintptr_t >( addr - baseAddr ) : 0;
+        };
+        std::unordered_map<std::string, uintptr_t> fp_map = {
+            { "dm_entry", to_rva( dm_entry ) },
+            { "dm_get_hp", to_rva( dm_get_hp ) },
+            { "dm_get_props", to_rva( dm_get_props ) },
+            { "bullets_em_sig", bullets_em_sig_rva },
+        };
+        const uint64_t fingerprint = compute_fingerprint( fp_map );
+        write_offsets_file( fingerprint, c_game_rva, c_local_rva,
+            fp_map[ "dm_entry" ], fp_map[ "dm_get_hp" ], fp_map[ "dm_get_props" ],
+            bullets_em_rva, bullets_em_sig_rva );
 
         // 应用全局偏移到 offsets 命名空间
         if ( c_game_rva >= 0x100000 )
@@ -186,71 +277,46 @@ namespace update
         if ( c_local_rva >= 0x100000 )
             offsets::globals::local_player = c_local_rva;
 
-        LOG( "[update] Signature scan complete. Offsets written to file.\n" );
+        LOG( "[update] Signature scan complete, fingerprint %016llX. Offsets written to file.\n", fingerprint );
     }
 
-    // ── 主入口 ─────────────────────────────────────────────────
+    // ── 主入口：布局指纹门控 ──────────────────────────────────
+    // 不再依赖版本字符串（实测本版映像内无 ASCII 版本串，且模块尾部数据区会被动态卸载）。
+    // 原理：offsets 文件存有上一轮各签名命中点 RVA；启动时读这些点的当前字节做 FNV-1a，
+    //       与存档指纹一致 → 偏移仍有效直接加载；不一致（游戏热更/文件缺失/老格式）→ 全量重扫。
     inline auto run( ) -> bool
     {
-        // 读取当前游戏版本字符串
-        std::string current_version = TargetProcess->ReadString( baseAddr + version_string_rva );
-        if ( current_version.empty( ) )
-        {
-            LOG( "[update] Warning: could not read version string, using hardcoded offsets.\n" );
-            LOG( "Offsets loaded for War Thunder (hardcoded fallback)\n" );
-            return true;
-        }
-
-        LOG( "[update] Game version: %s\n", current_version.c_str( ) );
-
-        // 检查 offsets 文件是否存在
+        LOG( "[update] Layout-fingerprint offset validation...\n" );
         if ( std::filesystem::exists( "offsets" ) )
         {
-            std::string cached_version;
-            std::ifstream file( "offsets" );
-            if ( file.is_open( ) )
+            auto offset_map = parse_offsets( );
+            if ( offset_map.count( "c_game" ) && offset_map.count( "bullets_em" ) )
             {
-                std::getline( file, cached_version );
-                file.close( );
-            }
-
-            if ( cached_version == current_version )
-            {
-                // 版本一致，从文件加载偏移
-                auto offset_map = parse_offsets( );
-
-                if ( offset_map.find( "c_game" ) != offset_map.end( ) )
+                const uint64_t fp_now = compute_fingerprint( offset_map );
+                auto it = offset_map.find( "fingerprint" );
+                if ( it != offset_map.end( ) && it->second == fp_now )
+                {
                     offsets::globals::game_context = offset_map[ "c_game" ];
-
-                if ( offset_map.find( "c_local" ) != offset_map.end( ) )
                     offsets::globals::local_player = offset_map[ "c_local" ];
-
-                LOG( "[update] Version match — loaded cached offsets from file.\n" );
-                LOG( "[update] c_game RVA = 0x%llX, c_local RVA = 0x%llX\n",
-                     (uint64_t)offsets::globals::game_context, (uint64_t)offsets::globals::local_player );
-
-                // 即使版本一致，也验证 DM 入口链特征码是否仍然有效
-                auto dm_entry = TargetProcess->FindSignature( sig_dm_entry, baseAddr, baseAddr + baseSize );
-                if ( dm_entry >= 0x100000 )
-                    LOG( "[update] DM entry chain confirmed (unit+0x10A8 → +0x370) @ aces.exe+0x%llX\n", dm_entry - baseAddr );
-                else
-                    LOG( "[update] WARNING: DM entry signature not found! Damage model offsets may need update.\n" );
-
-                return true;
+                    offsets::bullets::entity_manager = offset_map[ "bullets_em" ];
+                    LOG( "[update] Fingerprint MATCH (0x%016llX) — cached offsets loaded:\n"
+                         "[update]   c_game=0x%llX c_local=0x%llX bullets_em=0x%llX\n",
+                         fp_now,
+                         (uint64_t)offsets::globals::game_context, (uint64_t)offsets::globals::local_player,
+                         (uint64_t)offsets::bullets::entity_manager );
+                    return true;
+                }
+                LOG( "[update] Fingerprint MISMATCH (stored=%s, now=0x%016llX) — rescanning...\n",
+                     it != offset_map.end( ) ? "differs" : "absent", fp_now );
             }
-
-            // 版本不匹配，执行重新扫描
-            LOG( "[update] Version changed (%s → %s), rescanning...\n", cached_version.c_str( ), current_version.c_str( ) );
+            else
+                LOG( "[update] offsets file incomplete — rescanning...\n" );
         }
         else
-        {
-            LOG( "[update] No offsets file found, performing initial scan...\n" );
-        }
+            LOG( "[update] No offsets file found — performing initial scan...\n" );
 
-        // 执行特征码扫描
-        do_scan( current_version );
-
-        LOG( "Offsets loaded for War Thunder %s\n", current_version.c_str( ) );
+        do_scan( );
+        LOG( "Offsets loaded for War Thunder (fingerprint-validated)\n" );
         return true;
     }
 }
