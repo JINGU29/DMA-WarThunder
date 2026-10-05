@@ -299,7 +299,31 @@ namespace esp
 
 			// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（Style 1 + 分级 LOD 防远距糊团）──
 			draw_part_markers( unit, camera_matrix );
-        }
+
+			// 弹道落点部位：被选中的部件盒青色高亮（弹道预测的红色命中框就在这个部件上）
+			if ( misc::bBallisticPrediction && misc::ballisticAimPart > 0
+				&& unit.bHasAimPoint && unit.aimPartIdx >= 0
+				&& unit.aimPartIdx < static_cast< int >( unit.partBoxes.size( ) ) )
+			{
+				const auto& pb = unit.partBoxes[ unit.aimPartIdx ];
+				std::array<vec2_t, 8> s;
+				bool ok = true;
+				for ( int c = 0; c < 8; ++c )
+					if ( !g_render->world_to_screen( pb.corners[ c ], s[ c ], camera_matrix ) )
+					{
+						ok = false;
+						break;
+					}
+				if ( ok )
+				{
+					// 角点位序 bit0=x bit1=y bit2=z（与部件标记一致），12 条棱
+					static const int selEdges[ 12 ][ 2 ] = { {0,1},{1,3},{3,2},{2,0},{4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7} };
+					for ( const auto& e : selEdges )
+						g_render->line( s[ e[ 0 ] ].x, s[ e[ 0 ] ].y, s[ e[ 1 ] ].x, s[ e[ 1 ] ].y,
+							IM_COL32( 60, 230, 255, 235 ), 2.2f );
+				}
+			}
+		}
 
 		// 节流日志（5 秒一次）：ESP 渲染计数器，用于诊断画面不显示的原因
 		static auto s_lastEspLog = std::chrono::steady_clock::now();

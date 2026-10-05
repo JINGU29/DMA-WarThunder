@@ -87,6 +87,9 @@ struct SImGuiUnit
 	// aimbot 预计算
 	bool bHasAimPoint = false;
 	vec3_t aimPoint;
+
+	// 弹道落点部位选择：被选中的部件盒在 partBoxes 中的索引（-1=未选中，回落车体中心）
+	int aimPartIdx = -1;
 };
 
 // 单发在飞弹丸（数据线程写、渲染线程读；来源 ECS bullet_component，链路见 docs/弹丸追踪-逆向编年史.md）

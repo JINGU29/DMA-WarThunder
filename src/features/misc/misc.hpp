@@ -34,6 +34,10 @@ namespace misc
 	// 弹道预测开关（提前量 + 下坠补偿，陆战坦克为主）
 	inline bool bBallisticPrediction = true;
 
+	// 弹道落点部位选择（DamageModel 部件盒驱动）：0=车体中心（默认）1=炮闩 2=弹药架 3=乘员
+	// 同类部件取离本地玩家最近者（炮线最短、最易击穿）；部件数据未加载时回落车体中心
+	inline int ballisticAimPart = 0;
+
 	// 弹丸追踪开关（在飞真炮弹；链路 docs/弹丸追踪-逆向编年史.md，Phase C 轨迹渲染数据源）
 	inline bool bBulletTracer = true;
 
@@ -928,16 +932,17 @@ struct UnitReadBuffer
 			unit.bVisible = ( unit.distance <= 230.0f ) || ( ( buffers[i].flags & 0x800 ) != 0 );
 
 			// 弹道预测：提前量（目标速度×飞行时间）+ 下坠补偿（0.5*g*t^2）
-			// 参考第三方：fTime = dist/弹速；aim = 目标位置 + 目标速度×fTime；y += 0.5*9.81*fTime²
-			// 距离：3D 直线距离（比 2D 水平距离更贴近真实弹道飞行长度）
+			// 落点基准：默认车体包围盒中部；ballisticAimPart>0 时取指定类别的部件盒中心
+			// （同类部件取离本地玩家最近者——炮线最短、最易击穿），部件未加载回落车体
 			if ( misc::bBallisticPrediction && computedData.ballisticVelocity > 10.0f )
 			{
-				const float fDist = ( unit.distance3d > 8.0f ) ? unit.distance3d : unit.distance;
-				const float fTime = fDist / computedData.ballisticVelocity;
-
-				// 目标瞄准点：车体包围盒中部（比 worldOrigin 更接近实际命中面）
 				vec3_t targetPos = unit.worldOrigin;
 				targetPos.y += ( buffers[i].bbmin.y + buffers[i].bbmax.y ) * 0.5f;
+				float fDist = ( unit.distance3d > 8.0f ) ? unit.distance3d : unit.distance;
+
+				unit.aimPartIdx = -1;   // 默认回落车体；部件段就绪后二次修正
+
+				const float fTime = fDist / computedData.ballisticVelocity;
 
 				vec3_t aimPoint = targetPos + unit.velocity * fTime;
 				aimPoint.y += 0.5f * 9.81f * fTime * fTime;
@@ -1136,6 +1141,46 @@ struct UnitReadBuffer
 						for ( int c = 0; c < 8; ++c )
 							u.partBoxes[k].corners[c] = u.worldOrigin + u.rotation.transform( mesh.boxes[k].corners[c] );
 					}
+				}
+
+				// 弹道落点部位二次修正：partBoxes 本帧世界坐标已就绪，把预测重算到指定部件盒中心
+				// （同类部件取离本地玩家最近者——炮线最短最易击穿；该单位无目标类别部件时回落车体中心）
+				if ( misc::bBallisticPrediction && misc::ballisticAimPart > 0
+					&& computedData.ballisticVelocity > 10.0f && u.bHasAimPoint )
+				{
+					const EPartClass want = ( misc::ballisticAimPart == 1 ) ? EPartClass::Breech :
+						( misc::ballisticAimPart == 2 ) ? EPartClass::Ammo : EPartClass::Crew;
+					float best = 1e30f;
+					int idx = -1;
+					vec3_t bestC{};
+					for ( size_t k = 0; k < u.partBoxes.size( ); ++k )
+					{
+						if ( u.partBoxes[ k ].cls != want )
+							continue;
+						vec3_t c{};
+						for ( const auto& cn : u.partBoxes[ k ].corners )
+						{
+							c.x += cn.x; c.y += cn.y; c.z += cn.z;
+						}
+						c.x /= 8.0f; c.y /= 8.0f; c.z /= 8.0f;
+						const float d = ( c - local_position ).length( );
+						if ( d < best )
+						{
+							best = d;
+							idx = static_cast< int >( k );
+							bestC = c;
+						}
+					}
+					if ( idx >= 0 )
+					{
+						const float fTime = best / computedData.ballisticVelocity;
+						vec3_t aim = bestC + u.velocity * fTime;
+						aim.y += 0.5f * 9.81f * fTime * fTime;
+						u.aimPoint = aim;
+						u.aimPartIdx = idx;
+					}
+					else
+						u.aimPartIdx = -1;
 				}
 			}
 

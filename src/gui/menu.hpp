@@ -18,6 +18,12 @@ namespace GUI
 
 			// 弹道预测（提前量 + 下坠补偿，坦克炮弹用）
 			ImGui::Checkbox( "Ballistic Prediction", &misc::bBallisticPrediction );
+
+			// 弹道落点部位选择（DamageModel 部件盒驱动；部件数据未加载时回落车体中心）
+			const char* aimParts[] = { "Body Center (default)", "Breech", "Ammo Rack", "Crew" };
+			ImGui::Combo( "Aim Part", &misc::ballisticAimPart, aimParts, 4 );
+			ImGui::TextColored( ImVec4( 0.55f, 0.95f, 1.0f, 1.0f ), "Cyan box = selected part" );
+
 			ImGui::TextColored( ImVec4( 0.6f, 0.6f, 0.8f, 1.0f ), "Dashed line from tank to predicted hit (red box)" );
 
 			ImGui::Separator( );
