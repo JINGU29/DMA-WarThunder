@@ -2,6 +2,11 @@
 
 // Data
 static bool                     g_bShowDebug = true;  // Debug Info 窗口开关（F11 切换）
+// ★第 4 轮打点（2026-10-05）：帧卡顿探针 —— FRAMEHITCH 明细（>20ms 且 <300ms，前 120 条）+ HITCHSTAT 每 5s 汇总
+static int                      g_frameCount = 0;
+static int                      g_hitchCount = 0;
+static int                      g_hitchLogCount = 0;
+static float                    g_maxGapMs = 0.0f;
 static ID3D11Device*            g_pd3dDevice = nullptr;
 static ID3D11DeviceContext*     g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*          g_pSwapChain = nullptr;
@@ -132,6 +137,26 @@ int main( int, char** )
             CreateRenderTarget( );
         }
 
+        // ★第 4 轮打点：帧间隔探针（正常 7~14ms；>20ms 记数，>20ms 且 <300ms 记 FRAMEHITCH，5s 汇总见 HITCHSTAT）
+        {
+            static auto tPrevFrame = std::chrono::steady_clock::now( );
+            const auto tFrame = std::chrono::steady_clock::now( );
+            const float dtMs = std::chrono::duration<float, std::milli>( tFrame - tPrevFrame ).count( );
+            tPrevFrame = tFrame;
+            ++g_frameCount;
+            if ( dtMs > 20.0f )
+            {
+                ++g_hitchCount;
+                if ( dtMs > g_maxGapMs )
+                    g_maxGapMs = dtMs;
+                if ( dtMs < 300.0f && g_hitchLogCount < 120 )
+                {
+                    TRACE( "FRAMEHITCH dt=%.0fms", dtMs );
+                    ++g_hitchLogCount;
+                }
+            }
+        }
+
         // Start the Dear ImGui frame
         ImGui_ImplDX11_NewFrame( );
         ImGui_ImplWin32_NewFrame( );
@@ -243,6 +268,11 @@ int main( int, char** )
         auto now = std::chrono::steady_clock::now( );
         if ( std::chrono::duration_cast< std::chrono::seconds >( now - last_dump ).count( ) >= 5 )
         {
+            // ★第 4 轮打点：周期汇总（帧数 / >20ms 卡顿数 / 最大间隔），与数据线程周期对齐分析
+            TRACE( "HITCHSTAT frames=%d hitch20=%d maxgap=%.0fms", g_frameCount, g_hitchCount, g_maxGapMs );
+            g_frameCount = 0;
+            g_hitchCount = 0;
+            g_maxGapMs = 0.0f;
             dump_log_to_file( );
             last_dump = now;
         }

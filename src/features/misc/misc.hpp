@@ -49,7 +49,7 @@ namespace misc
 
 	// 导弹/炸弹追踪渲染（查询选择器链，offsets::missiles）：敌我分色 + 名字 + 弹道
 	inline bool bMissileWarn = true;
-	inline bool bMissileOwnOnly = false;  // 方案 A 暂关：2.59 owner@0x48 不是 unit 指针（是数值 ID），待校准后开启
+	inline bool bMissileOwnOnly = false;  // 只标自己发射的（owner@0x58 tagged 已校准 ★2.59 dump；菜单可关看全部）
 
 	// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（网格束链，2026-10-04 实测；链详见 offsets::damage_model::mesh_bundle 注释）──
 	inline bool bPartMarkersCrew = true;   // 菜单开关：乘员部件标记（橙，Style 1 渲染）
@@ -134,6 +134,7 @@ namespace misc
 		bool valid = false;
 	};
 	inline std::unordered_map<uintptr_t, SUnitMesh> g_meshCache;
+	inline std::unordered_map<uintptr_t, std::pair<vec3_t, std::chrono::steady_clock::time_point>> g_unitPrevPos; // 单位速度帧差分兜底（空中容器链失效时）
 
 	// 读取一个单位的网格束并重建缓存：链 4 跳 + header 块 + (部件表+配位连续读) + 名字池 = 7 次 DMA
 	inline auto fetch_unit_mesh( uintptr_t unitAddr, SUnitMesh& mesh ) -> bool
@@ -654,28 +655,30 @@ namespace misc
 		// objptr = u64[ cb + 0x2c0 + row*0x10 ]（指针列 0x10/行）→
 		// 世界坐标 = [objptr + POS_OFF] f32 vec3
 		// 实测参数：rocket(tid=0x54, arch33, POS_OFF=+0x2C0) / bomb(tid=0x59, arch32, POS_OFF=+0x244)
-		// owner 探测：obj+0x48 与 myUnit 比对（方案 A 过滤依据，2.59 待用户复核）
+		// owner：obj+0x58 tagged unit 指针（低位=flag，比较前 &~1）★2.59 msl_obj_dump 校准
+		// 速度：obj+POS_OFF+0x1C vec3（★2.59 dump 校准，帧差分方向误差 <1%）
 		struct STypeParam
 		{
 			uint16_t typeId;
 			uintptr_t posOff;
+			uintptr_t velOff;
 			bool isBomb;
 		};
 
 		inline std::unordered_map<uintptr_t, std::string> g_mslNameCache;   // obj 指针 → 武器名
 		inline std::unordered_map<uintptr_t, std::pair<vec3_t, std::chrono::steady_clock::time_point>> g_mslPrevPos; // 帧差分速度
 
-		// 速度获取：优先 obj+0x480 探测，兜底帧差分
-		inline auto get_vel( uintptr_t objptr, const vec3_t& pos ) -> vec3_t
+		// 速度获取：obj+velOff 实测速度（★2.59 dump 校准），兜底帧差分
+		inline auto get_vel( uintptr_t objptr, uintptr_t velOff, const vec3_t& pos ) -> vec3_t
 		{
 			vec3_t vel{};
-			// ① 探测 obj+0x480（编年史 §2.7.2"移动 vec3 疑速度"）
-			vec3_t v480{};
-			if ( TargetProcess->Read( objptr + 0x480, &v480, sizeof( v480 ) ) )
+			// ① obj+velOff（rocket=0x2DC / bomb=0x260；dump 实测 (-110.7,-198.2,-192.0) 与帧差分方向一致）
+			vec3_t v{};
+			if ( TargetProcess->Read( objptr + velOff, &v, sizeof( v ) ) )
 			{
-				const float s = v480.length( );
-				if ( std::isfinite( s ) && s > 30.0f && s < 3000.0f )
-					return v480;
+				const float s = v.length( );
+				if ( std::isfinite( s ) && s > 0.5f && s < 5000.0f )
+					return v;
 			}
 			// ② 帧差分兜底
 			const auto now = std::chrono::steady_clock::now( );
@@ -783,8 +786,8 @@ namespace misc
 			data.bHasRocketImpact = false;
 
 			const STypeParam types[ 2 ] = {
-				{ 0x54, 0x2C0, false },   // rocket：arch33 实测 POS_OFF=+0x2C0
-				{ 0x59, 0x244, true },    // bomb：arch32 实测 POS_OFF=+0x244
+				{ 0x54, 0x2C0, 0x2DC, false },   // rocket：arch33 实测 POS_OFF=+0x2C0，vel=+0x2DC ★dump 校准
+				{ 0x59, 0x244, 0x260, true },    // bomb：arch32 实测 POS_OFF=+0x244，vel=pos+0x1C 推定
 			};
 
 			const int16_t myUnitIndex = ( myUnit > 0x10000 )
@@ -824,28 +827,127 @@ namespace misc
 					if ( fabs( pos.x ) > 60000.0f || fabs( pos.y ) > 60000.0f || fabs( pos.z ) > 60000.0f )
 						continue;
 
-					// owner 探测：obj+0x48 与 myUnit 比对（方案 A 过滤依据，2.59 待复核——首次打日志）
-					uint64_t owner = 0;
-					TargetProcess->Read( objptr + 0x48, &owner, sizeof( owner ) );
+					// owner：obj+0x58 tagged 指针 ★2.59 dump 校准：off=0x58 q=2a6d303f421 == myUnit|1
+					// （0x48 是 u32 对 (3, 0x66474) 非指针；0x4A0 是同指针第二份拷贝）
+					uint64_t ownerRaw = 0;
+					TargetProcess->Read( objptr + om::proj_owner, &ownerRaw, sizeof( ownerRaw ) );
+					const uint64_t owner = ownerRaw & ~1ULL;
 					const bool own = ( owner != 0 && owner == myUnit );
 					static int s_ownerLogCount = 0;
 					if ( s_ownerLogCount < 8 )
 					{
-						TRACE("MSL tid=%x row=%u obj=%llx owner=%llx myUnit=%llx own=%d pos=(%.0f,%.0f,%.0f)",
+						TRACE("MSL tid=%x row=%u obj=%llx owner58=%llx raw=%llx myUnit=%llx own=%d pos=(%.0f,%.0f,%.0f)",
 							tp.typeId, row, (unsigned long long)objptr, (unsigned long long)owner,
+							(unsigned long long)ownerRaw,
 							(unsigned long long)myUnit, (int)own, pos.x, pos.y, pos.z);
 						++s_ownerLogCount;
 					}
 
+					// ── 校准 dump：每进程首次检测到导弹时，落盘弹体对象前 0x2000 字节（★扩到高位区找 CCIP
+					// 落点向量：容器 0x1C9C 已否定，obj 内部 0x800~0x2000 是下一个候选区）+ ballistics 容器 CCIP 区
+					// ★flag 在读成功后才置位：DMA 瞬时失败时下一帧重试（导弹持续在飞，机会不丢）
+					static bool s_calDumped = false;
+					if ( !s_calDumped )
+					{
+						constexpr size_t DUMP_SZ = 0x2000;
+						std::vector<uint8_t> dump( DUMP_SZ );
+						if ( TargetProcess->Read( objptr, dump.data( ), DUMP_SZ ) )
+						{
+							s_calDumped = true;
+							FILE* fp = nullptr;
+							fopen_s( &fp, "msl_obj_dump.bin", "wb" );
+							if ( fp ) { fwrite( dump.data( ), 1, DUMP_SZ, fp ); fclose( fp ); }
+							for ( size_t off = 0; off < DUMP_SZ; off += 8 )
+							{
+								uint64_t q = 0;
+								memcpy( &q, dump.data( ) + off, 8 );
+								float f0, f1;
+								memcpy( &f0, dump.data( ) + off, 4 );
+								memcpy( &f1, dump.data( ) + off + 4, 4 );
+								if ( q == 0 || q == 0xFFFFFFFFFFFFFFFFULL ) continue;
+								TRACE("CAL off=%03llx q=%016llx f=(%.3f,%.3f) %s",
+									off, q, f0, f1,
+									(q == myUnit) ? " <<< == myUnit!" :
+									((q & ~1ULL) == myUnit) ? " <<< == myUnit|tag!" :
+									(q > 0x10000000000ULL && q < 0x7FFFFFFFFFFFULL) ? "PTR" : "");
+							}
+							TRACE("CAL myUnit=%llx done", (unsigned long long)myUnit);
+						}
+
+						// CCIP 校准：ballistics 容器 +0x1B00..0x2000（候选 0x1C9C/0x1CCC）
+						const uintptr_t bc = TargetProcess->Read<uintptr_t>(
+							data.gameCtx.cGame + offsets::cgame_offsets::ballistic_offsets::ballistics_ptr );
+						if ( bc > 0x10000 )
+						{
+							constexpr uintptr_t CC_BASE = 0x1B00;
+							constexpr size_t CC_SZ = 0x500;
+							std::vector<uint8_t> cd( CC_SZ );
+							if ( TargetProcess->Read( bc + CC_BASE, cd.data( ), CC_SZ ) )
+							{
+								FILE* fp2 = nullptr;
+								fopen_s( &fp2, "bc_ccip_dump.bin", "wb" );
+								if ( fp2 ) { fwrite( cd.data( ), 1, CC_SZ, fp2 ); fclose( fp2 ); }
+								for ( size_t off = 0; off < CC_SZ; off += 8 )
+								{
+									uint64_t q = 0;
+									memcpy( &q, cd.data( ) + off, 8 );
+									float f0, f1;
+									memcpy( &f0, cd.data( ) + off, 4 );
+									memcpy( &f1, cd.data( ) + off + 4, 4 );
+									if ( q == 0 || q == 0xFFFFFFFFFFFFFFFFULL ) continue;
+									const uintptr_t realOff = CC_BASE + off;
+									TRACE("CCIP off=%04llx q=%016llx f=(%.1f,%.1f)%s",
+										realOff, q, f0, f1,
+										( realOff == 0x1C9C || realOff == 0x1CCC ) ? " <<< candidate" : "");
+								}
+							TRACE("CCIP bc=%llx done", (unsigned long long)bc);
+						}
+					}
+
+					// Guidance 结构 dump：★CCIP 落点已排除弹体 obj 0x0~0x2000（实为配置+发射点 vec3@0xF0
+					// + 子对象指针数组@0x1538）；2.57 源在 Guidance 内有 Position@0x1D0 候选
+					// ★dump 实测 0x648=0（三场次一致）——2.59 上该偏移非指针，probe 行用于确认
+					const uintptr_t gd = TargetProcess->Read<uintptr_t>( objptr + om::proj_guidance );
+					TRACE("GUID probe obj=%llx gd=%llx (0x648)", (unsigned long long)objptr, (unsigned long long)gd);
+					if ( gd > 0x10000 )
+					{
+						constexpr size_t GD_SZ = 0x400;
+						std::vector<uint8_t> gdb( GD_SZ );
+						if ( TargetProcess->Read( gd, gdb.data( ), GD_SZ ) )
+						{
+							FILE* fp3 = nullptr;
+							fopen_s( &fp3, "guid_dump.bin", "wb" );
+							if ( fp3 ) { fwrite( gdb.data( ), 1, GD_SZ, fp3 ); fclose( fp3 ); }
+							for ( size_t off = 0; off < GD_SZ; off += 8 )
+							{
+								uint64_t q = 0;
+								memcpy( &q, gdb.data( ) + off, 8 );
+								float f0, f1;
+								memcpy( &f0, gdb.data( ) + off, 4 );
+								memcpy( &f1, gdb.data( ) + off + 4, 4 );
+								if ( q == 0 || q == 0xFFFFFFFFFFFFFFFFULL ) continue;
+								TRACE("GUID off=%03llx q=%016llx f=(%.1f,%.1f) %s",
+									off, q, f0, f1,
+									( off == 0x1D0 ) ? " <<< candidate" :
+									( q > 0x10000000000ULL && q < 0x7FFFFFFFFFFFULL ) ? "PTR" : "");
+							}
+							TRACE("GUID gd=%llx done", (unsigned long long)gd);
+						}
+						else
+						{
+							// gd 看似合法但 0x400 读失败（DMA 瞬时/半映射）
+							TRACE("GUID read fail gd=%llx", (unsigned long long)gd);
+						}
+					}
+					}
 					// 方案 A：只标自己发射的（菜单可关看全部）
 					if ( misc::bMissileOwnOnly && !own )
 						continue;
 
 					SImGuiMissile m;
 					m.position = pos;
-					m.velocity = {};   // Route 1 无直接 vel 字段——由渲染端 pos 差分或后续验证 obj+0x480
 					m.speed = 0.0f;
-					m.velocity = get_vel( objptr, pos );
+					m.velocity = get_vel( objptr, tp.velOff, pos );   // obj+velOff 实测速度（帧差分兜底）
 					update_prev( objptr, pos );
 					m.sampleTime = std::chrono::steady_clock::now( );
 					m.speed = m.velocity.length( );
@@ -875,23 +977,25 @@ namespace misc
 			if ( g_mslNameCache.size( ) > 512 )
 				g_mslNameCache.clear( );
 
-			// 导弹 CCIP 落点：ballistics 容器 +0x1C9C（候选，飞机模式）
-			if ( data.bLocalIsPlane )
-			{
-				const uintptr_t bc = TargetProcess->Read<uintptr_t>(
-					data.gameCtx.cGame + offsets::cgame_offsets::ballistic_offsets::ballistics_ptr );
-				if ( bc > 0x10000 )
+				// 导弹 CCIP 落点：ballistics 容器 +0x1C9C（★2.59 实测否定——该区域为常量表无世界坐标；
+				// 此处保留读取但过滤全零/原地值，防止 (0,0,0) 在世界原点误画 pip。正确偏移待弹体 obj 高位 dump 校准）
+				if ( data.bLocalIsPlane )
 				{
-					vec3_t imp{};
-					if ( TargetProcess->Read( bc + offsets::missiles::rocket_impact_point, &imp, sizeof( imp ) )
-						&& std::isfinite( imp.x ) && std::isfinite( imp.y ) && std::isfinite( imp.z )
-						&& fabs( imp.x ) < 50000.0f && fabs( imp.y ) < 50000.0f && fabs( imp.z ) < 50000.0f )
+					const uintptr_t bc = TargetProcess->Read<uintptr_t>(
+						data.gameCtx.cGame + offsets::cgame_offsets::ballistic_offsets::ballistics_ptr );
+					if ( bc > 0x10000 )
 					{
-						data.rocketImpactPoint = imp;
-						data.bHasRocketImpact = true;
+						vec3_t imp{};
+						if ( TargetProcess->Read( bc + offsets::missiles::rocket_impact_point, &imp, sizeof( imp ) )
+							&& std::isfinite( imp.x ) && std::isfinite( imp.y ) && std::isfinite( imp.z )
+							&& fabs( imp.x ) < 50000.0f && fabs( imp.y ) < 50000.0f && fabs( imp.z ) < 50000.0f
+							&& ( imp.x != 0.0f || imp.y != 0.0f || imp.z != 0.0f ) )
+						{
+							data.rocketImpactPoint = imp;
+							data.bHasRocketImpact = true;
+						}
 					}
 				}
-			}
 		}
 	}
 
@@ -1060,7 +1164,13 @@ struct UnitReadBuffer
 		}
 
 		TRACE("GU p2 exec units=%zu (reqs=%zu)", numUnits, numUnits * 10);
-		if ( !TargetProcess->ExecuteReadScatter( hScatter, 0, true ) )
+		// ★位置采样基准：scatter 执行区间中点（无偏）。渲染端外推 age = renderNow − sampleTime
+		//   以此刻为基；此前 sampleTime 打在单位循环速度块（循环前还有弹丸/导弹/名字链等逐单位同步读），
+		//   靠后单位打戳晚 0.5~1s → age 被少算 → 框恒定落后 v×δ（150m/s×0.6s≈90m，2026-10-05 修复）
+		const auto tScatterBegin = std::chrono::steady_clock::now( );
+		const bool bScatterExecOk = TargetProcess->ExecuteReadScatter( hScatter, 0, true );
+		const auto unitScatterTime = tScatterBegin + ( std::chrono::steady_clock::now( ) - tScatterBegin ) / 2;
+		if ( !bScatterExecOk )
 		{
 			TRACE("GU p2 FAIL");
 			TargetProcess->CloseScatterHandle( hScatter );
@@ -1093,8 +1203,8 @@ struct UnitReadBuffer
 		}
 
 		// 导弹/炸弹查询链 + 导弹 CCIP 落点（offsets::missiles；选择器→子列表→active[i]→projectile）
+		const uintptr_t myUnit = TargetProcess->Read<uintptr_t>( baseAddr + offsets::globals::my_unit );
 		{
-			const uintptr_t myUnit = TargetProcess->Read<uintptr_t>( baseAddr + offsets::globals::my_unit );
 			// 全量单位索引映射（含队友/本地）：导弹制导 TargetUnitId 反查用
 			std::unordered_map< int16_t, uintptr_t > unitIdxMap;
 			for ( size_t k = 0; k < validUnits.size( ); ++k )
@@ -1102,8 +1212,14 @@ struct UnitReadBuffer
 			missile_pass::execute_pass( computedData, local_position, myUnit, unitIdxMap );
 		}
 
-		// 读取本地玩家是否为飞机
-		computedData.bLocalIsPlane = sdk::cLocalPlayer->getLocalUnit( ).getInfo( ).isPlane( );
+		// 本地玩家是否为空中单位：unit+0x8C 是 u8 类型枚举（0=空中/直升机，3=地面，5=其他）。
+		// ★修复：旧 isPlane() 把该字节当字符串指针解引用，2.59 上恒 false →
+		//   飞机模式判定失效（地面载具照画全套 ESP、预测红框照出），与数据线程 unitType 同源
+		{
+			const uint8_t localType = ( myUnit > 0x10000 )
+				? TargetProcess->Read<uint8_t>( myUnit + offsets::unit_offsets::unitType_offset ) : 3;
+			computedData.bLocalIsPlane = ( localType == 0 );
+		}
 
 		// 炸弹落点（飞机模式）
 		if ( computedData.bLocalIsPlane )
@@ -1177,23 +1293,84 @@ struct UnitReadBuffer
 			unit.unitIndex = buffers[i].unitIndex;
 			unit.reloadTime = buffers[i].reloadTime;
 
-			// 目标速度：unit+0x2100 是"地面运动容器"指针（第三方 2.59.0.44 验证），
-			// 速度向量在容器内 +0x5C（ground_velocity_offset）。必须二次解引用，不能直接当 vec3 读！
+			// 目标速度三段式：①地面运动容器(unit+0x2100→+0x5C，第三方 2.59.0.44 验证)
+			// ②空中运动容器(0xD50→+0x15E4) ③帧差分兜底。
+			// ★2.59.0.46 实测：0x2100 字段已是乱码（gm=...bf800000 含 -1.0f），读出 spd=inf 的
+			// 垃圾速度直通渲染 → 外推位移=inf → 8 角点全部投影失败 → 丢框。
+			// 因此容器指针必须范围校验、速度必须有限且 <1500m/s，不合格一律清零走帧差分。
 			{
-				vec3_t tgtVel;
-				if ( buffers[i].groundMovement )
+				vec3_t tgtVel{};
+				if ( buffers[i].groundMovement > 0x10000 && buffers[i].groundMovement < 0x7FFFFFFFFFFF )
 				{
 					tgtVel = TargetProcess->Read< vec3_t >( buffers[i].groundMovement + offsets::unit_offsets::ground_velocity_offset );
 				}
-				else
+				if ( unit.unitType == 0 )
 				{
-					// 地面容器无效（可能是飞机）：尝试空中运动容器
-					// airContainer(0xD50) + 0x15E4（第三方 air_velocity_offset）
+					// 空中单位：地面容器无效/不合格时尝试空中运动容器
 					const uintptr_t airMov = TargetProcess->Read< uintptr_t >( validUnits[i] + offsets::unit_offsets::airContainer_offset );
-					if ( airMov )
-						tgtVel = TargetProcess->Read< vec3_t >( airMov + 0x15E4 );
+					if ( airMov > 0x10000 && airMov < 0x7FFFFFFFFFFF )
+					{
+						const vec3_t airVel = TargetProcess->Read< vec3_t >( airMov + 0x15E4 );
+						if ( std::isfinite( airVel.x ) && std::isfinite( airVel.y ) && std::isfinite( airVel.z ) )
+							tgtVel = airVel;
+					}
 				}
+
+				// 速度合格性校验：有限且 5~1500 m/s。
+				// ★2.59 实测：空中容器残留垃圾 (0,0,±1.2) 长度 1.2 —— 若只查 <1500 会漏过，
+				// 又挡住帧差分兜底门槛（<0.5），导致外推拿 1.2m/s 假速度 = 框冻结整个采样周期
+				{
+					const float spd = tgtVel.length( );
+					if ( !std::isfinite( spd ) || spd >= 1500.0f || spd < 5.0f )
+						tgtVel = {};
+				}
+
+				// ③ 帧差分兜底：容器速度失效（0 或被清零）时用上一帧位置差算速度
+				// ★时间基准（2026-10-05 修复）：位置在 p2 scatter 执行时刻采样，帧差分 dt / prev 表 /
+				//   sampleTime 统一改用 unitScatterTime；velNow 仅留给 δ 打点
+				const auto velNow = std::chrono::steady_clock::now( );
+				if ( tgtVel.length( ) < 0.5f )
+				{
+					auto it = g_unitPrevPos.find( validUnits[i] );
+					if ( it != g_unitPrevPos.end( ) )
+					{
+						const float dt = std::chrono::duration<float>( unitScatterTime - it->second.second ).count( );
+						if ( dt > 0.01f )
+						{
+							const vec3_t raw = ( buffers[i].position - it->second.first ) / dt;
+							const float rawSpd = raw.length( );
+							if ( std::isfinite( rawSpd ) && rawSpd < 1500.0f )
+								tgtVel = raw;
+						}
+					}
+				}
+				g_unitPrevPos[ validUnits[i] ] = { buffers[i].position, unitScatterTime };
+				if ( g_unitPrevPos.size( ) > 512 )
+					g_unitPrevPos.clear( );
+
+				// 诊断：空中单位最终速度（兜底之后，前 16 条/进程——确认外推拿到的真实速度）
+				static int s_airVelLog = 0;
+				if ( unit.unitType == 0 && s_airVelLog < 16 )
+				{
+					TRACE( "AIRVEL unit=%llx vel=(%.1f,%.1f,%.1f) spd=%.1f",
+						(unsigned long long)validUnits[i],
+						tgtVel.x, tgtVel.y, tgtVel.z, tgtVel.length( ) );
+					++s_airVelLog;
+				}
+
 				unit.velocity = tgtVel;
+
+				// δ 量化打点（前 12 条/进程）：δ = 循环打戳时刻 − scatter 采样时刻
+				//   = 修复前「年龄少算量」→ 恒定落后距离 ≈ δ×速度（进战局用 crash_trace.log 验收）
+				static int s_scatDeltaLog = 0;
+				if ( s_scatDeltaLog < 12 )
+				{
+					const float dsec = std::chrono::duration<float>( velNow - unitScatterTime ).count( );
+					TRACE( "SCATDELTA unit=%llx delta=%.3fs spd=%.1f lag=%.1fm",
+						(unsigned long long)validUnits[i], dsec, tgtVel.length( ), dsec * tgtVel.length( ) );
+					++s_scatDeltaLog;
+				}
+				unit.sampleTime = unitScatterTime;   // 渲染端外推基准（esp 平滑）
 			}
 
 			// 距离：unit.distance = 2D 水平；另存 3D 直线距离用于弹道飞行时间
@@ -1381,22 +1558,27 @@ struct UnitReadBuffer
 			}
 		}
 
-		// --- DamageModel 乘员/弹药/油箱/炮闩部件标记：节流拉取 + 模型→世界变换 ---
+		// --- DamageModel 乘员/弹药/油箱/炮闩部件标记：按需拉取 + 模型→世界变换 ---
 		// 几何是静态资产（docs 9.25 节；第 13 轮实测 maxTdelta=0 无 [MESH-DYN] → 配位确认静态）：
-		// 每单位 2s 节流重拉；每周期预算限制拉取数量（6 个），摊薄 DMA 负载；
-		// 缓存收全部类别，绘制端按类别分别查开关（esp::draw_part_markers）。
-		if ( bPartMarkersCrew || bPartMarkersAmmo || bPartMarkersFuel || bPartMarkersBreech )
+		// ★成功拉取一次后永不重拉（2s 节流重拉是数据线程 ~1.1s/轮的最大开销源——每次拉取
+		//   数百个部件名 DMA 读）；失败 10s 重试。
+		// ★部件只在地面模式 + 坦克(type=3)上绘制：飞机模式 / 空中单位整块跳过，零开销。
+		if ( !computedData.bLocalIsPlane
+			&& ( bPartMarkersCrew || bPartMarkersAmmo || bPartMarkersFuel || bPartMarkersBreech ) )
 		{
 			int fetchBudget = 6;
 			const auto nowMesh = std::chrono::steady_clock::now( );
 
 			for ( auto& u : computedData.units )
 			{
-				if ( !u.bValidEnemy )
+				if ( !u.bValidEnemy || u.unitType != 3 )
 					continue;
 
 				SUnitMesh& mesh = g_meshCache[u.unitAddr];
-				if ( ( nowMesh - mesh.lastFetch ) >= std::chrono::seconds( 2 ) && fetchBudget > 0 )
+				const bool needFetch = !mesh.valid
+					? ( nowMesh - mesh.lastFetch ) >= std::chrono::seconds( 10 )   // 失败 10s 重试
+					: ( mesh.fetchCount == 0 );                                    // 成功即终版，静态几何不重拉
+				if ( needFetch && fetchBudget > 0 )
 				{
 					--fetchBudget;
 					if ( !fetch_unit_mesh( u.unitAddr, mesh ) )

@@ -43,17 +43,17 @@ namespace esp
     // 开镜缩放自动保证：盒为世界空间（随投影放大）；兜底阈值为屏幕像素判定（放大后超阈即回真实盒形）。
     // 分级 LOD 防远距糊团（单车 ammo 部件多达 40~86 个，兜底框叠加糊成一团），按敌人 8 角大盒投影最长边定级：
     //   ≥kLodFullPx 全细节逐盒；kLodOffPx~kLodFullPx 弹药合并成单个红色包围框、其余照常；<kLodOffPx 全隐藏。
-    inline auto draw_part_markers( const SImGuiUnit& unit, const matrix4x4_t& matrix ) -> void
+    inline auto draw_part_markers( const SImGuiUnit& unit, const matrix4x4_t& matrix, const vec3_t& exDelta ) -> void
     {
         if ( !misc::bPartMarkersCrew && !misc::bPartMarkersAmmo && !misc::bPartMarkersFuel && !misc::bPartMarkersBreech )
             return;
 
-        // LOD 定级：敌人 8 角大盒（worldCorners）屏幕投影范围
+        // LOD 定级：敌人 8 角大盒（worldCorners+外推位移）屏幕投影范围
         constexpr float kLodFullPx = 150.0f;   // ≥此值 → 全细节（阈值按实测观感可调）
         constexpr float kLodOffPx  = 55.0f;    // <此值 → 部件标记全隐藏（只剩敌人8角大盒）
         std::array<vec2_t, 8> bs;
         for ( int i = 0; i < 8; ++i )
-            if ( !g_render->world_to_screen( unit.worldCorners[i], bs[i], matrix ) )
+            if ( !g_render->world_to_screen( unit.worldCorners[i] + exDelta, bs[i], matrix ) )
                 return;   // 大盒任一角在视点后 → 整个单位跳过
         float bMinX = bs[0].x, bMaxX = bs[0].x, bMinY = bs[0].y, bMaxY = bs[0].y;
         for ( int i = 1; i < 8; ++i )
@@ -94,7 +94,7 @@ namespace esp
             bool ok = true;
             for ( int i = 0; i < 8; ++i )
             {
-                if ( !g_render->world_to_screen( pb.corners[i], s[i], matrix ) )
+                if ( !g_render->world_to_screen( pb.corners[i] + exDelta, s[i], matrix ) )
                 {
                     ok = false;
                     break;
@@ -256,14 +256,51 @@ namespace esp
                 continue;
             ++validEnemies;
 
-            // 对预计算的世界顶点做 world_to_screen（使用最新视角矩阵）
+            // ── 渲染端外推：box = 采样位置 + velocity × (now - sampleTime)，
+            //    消除"数据线程采样 → 渲染帧"时间差导致的高速单位（飞机）跳动/滞后。
+            //    ★age 上限必须 ≥ 数据线程轮次间隔（实测 ~1.1s）：上限小于间隔时，每个周期
+            //    后半段外推被掐断、框掉回旧采样点，下一轮采样又弹回真实位置 → 前后跳动。
+            //    速度合法性已在数据线程校验（有限且 <1500m/s），此处上限仅作最后保险。
+            vec3_t exDelta{};
+            {
+                const float age = std::chrono::duration<float>(
+                    std::chrono::steady_clock::now( ) - unit.sampleTime ).count( );
+                const float spd = unit.velocity.length( );
+                if ( spd > 1.0f && spd < 1500.0f && age > 0.0f && age < 2.0f )
+                {
+                    const vec3_t d = unit.velocity * age;
+                    if ( d.length( ) < 2000.0f )   // 位移上限：垃圾速度漏网时保框不消失（丢框防护）
+                        exDelta = d;
+                }
+            }
+            const vec3_t renderOrigin = unit.worldOrigin + exDelta;
+
+            // ── 飞机模式省开销：地面载具只显示名字+距离（不画 8 角框/部件标记/预测点，
+            //    一帧省掉 30+ 单位 × (8 次投影+12 条线+部件盒) 的绘制调用）
+            if ( renderData.bLocalIsPlane && unit.unitType != 0 )
+            {
+                vec2_t os;
+                if ( g_render->world_to_screen( renderOrigin, os, camera_matrix ) )
+                {
+                    if ( !unit.vehicleName.empty( ) )
+                        g_render->text( { os.x, os.y - 20.0f }, IM_COL32( 0, 255, 255, 255 ), 1,
+                            unit.vehicleName.c_str( ), g_render->fonts( ).m_esp );
+                    char distance_text[ 16 ];
+                    snprintf( distance_text, sizeof( distance_text ), "%dm", static_cast<int>( unit.distance ) );
+                    g_render->text( { os.x, os.y + 5.0f }, IM_COL32( 255, 255, 255, 255 ), 0,
+                        distance_text, g_render->fonts( ).m_esp );
+                }
+                continue;
+            }
+
+            // 对预计算的世界顶点做 world_to_screen（使用最新视角矩阵；含外推平移）
             std::array<vec2_t, 8> screen_corners;
             bool corners_visible[8] = {};
             int visible_count = 0;
 
             for ( size_t i = 0; i < unit.worldCorners.size( ); ++i )
             {
-                if ( g_render->world_to_screen( unit.worldCorners[i], screen_corners[i], camera_matrix ) )
+                if ( g_render->world_to_screen( unit.worldCorners[i] + exDelta, screen_corners[i], camera_matrix ) )
                 {
                     corners_visible[i] = true;
                     ++visible_count;
@@ -325,7 +362,7 @@ namespace esp
 
                 // 计算单位中心点屏幕坐标用于文字定位
                 vec2_t unit_screen;
-                g_render->world_to_screen( unit.worldOrigin, unit_screen, camera_matrix );
+                g_render->world_to_screen( renderOrigin, unit_screen, camera_matrix );
 
                 // 载具名字显示（青色带描边，显示在框顶部上方）
                 if ( !unit.vehicleName.empty( ) )
@@ -373,11 +410,14 @@ namespace esp
 				}
 			}
 
-			// ── DamageModel 乘员/弹药/油箱/炮闩部件标记（Style 1 + 分级 LOD 防远距糊团）──
-			draw_part_markers( unit, camera_matrix );
+			// ── DamageModel 部件标记：只在地面模式 + 地面载具(type=3)上画。
+			//    飞机模式不画（部件无意义且省开销），地面模式下空中单位也不画（pilot_dm/_Clip_* 无用）──
+			if ( !renderData.bLocalIsPlane && unit.unitType == 3 )
+				draw_part_markers( unit, camera_matrix, exDelta );
 
-			// 弹道落点部位：被选中的部件盒青色高亮（弹道预测的红色命中框就在这个部件上）
-			if ( misc::bBallisticPrediction && misc::ballisticAimPart > 0
+			// 弹道落点部位：被选中的部件盒青色高亮（同样仅地面模式 + 地面载具）
+			if ( !renderData.bLocalIsPlane && unit.unitType == 3
+				&& misc::bBallisticPrediction && misc::ballisticAimPart > 0
 				&& unit.bHasAimPoint && unit.aimPartIdx >= 0
 				&& unit.aimPartIdx < static_cast< int >( unit.partBoxes.size( ) ) )
 			{
@@ -385,7 +425,7 @@ namespace esp
 				std::array<vec2_t, 8> s;
 				bool ok = true;
 				for ( int c = 0; c < 8; ++c )
-					if ( !g_render->world_to_screen( pb.corners[ c ], s[ c ], camera_matrix ) )
+					if ( !g_render->world_to_screen( pb.corners[ c ] + exDelta, s[ c ], camera_matrix ) )
 					{
 						ok = false;
 						break;

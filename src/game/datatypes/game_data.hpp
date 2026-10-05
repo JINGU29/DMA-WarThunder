@@ -86,6 +86,9 @@ struct SImGuiUnit
 	// 速度（用于 aimbot 预测）
 	vec3_t velocity;
 
+	// 数据采样时刻（渲染线程外推用：renderPos = pos + vel × age，平滑高速单位跳动）
+	std::chrono::steady_clock::time_point sampleTime;
+
 	// aimbot 预计算
 	bool bHasAimPoint = false;
 	vec3_t aimPoint;

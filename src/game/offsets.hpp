@@ -225,9 +225,9 @@ namespace offsets
 		constexpr uintptr_t idx_inline_offs  = 0x04;      // 子列表偏移内联区（≤9 个）
 		constexpr uintptr_t idx_ext_offs     = 0x08;      // >9 时外部偏移数组指针
 		constexpr uintptr_t idx_comp_matrix  = 0x18;      // 组件偏移矩阵（[0]=弹体列 [1]=active 列）
-		constexpr uintptr_t proj_pos         = 0x2C8;     // vec3 世界坐标
-		constexpr uintptr_t proj_vel         = 0x2E4;     // vec3 速度
-		constexpr uintptr_t proj_owner       = 0x48;      // owner unit 指针
+		constexpr uintptr_t proj_pos         = 0x2C0;     // vec3 世界坐标 ★2.59 dump 校准（rocket@0x2C0 / bomb@0x244，missile_pass STypeParam 表）
+		constexpr uintptr_t proj_vel         = 0x2DC;     // vec3 速度 ★2.59 dump 校准（=pos+0x1C；rocket@0x2DC / bomb@0x260；0x2E4 只是它的 z 分量）
+		constexpr uintptr_t proj_owner       = 0x58;      // owner unit 指针 ★2.59 dump 校准（tagged：低位=flag，比较前 &~1；0x48 是 u32 对(3,0x66474) 非指针）
 		constexpr uintptr_t proj_namecont_ms = 0x6E8;     // 导弹名字容器指针
 		constexpr uintptr_t proj_namecont_bomb = 0x6E0;   // 炸弹名字容器指针
 		constexpr uintptr_t namecont_text_ms = 0x50;      // 名字文本偏移（导弹）
@@ -240,7 +240,9 @@ namespace offsets
 		constexpr uintptr_t guid_isTracking = 0x51;       // u8
 		constexpr uintptr_t guid_target_id  = 0x8C;       // s16 目标单位 UnitIndex（对比 unit+0x8）
 
-		// ballistics 容器内导弹 CCIP 落点（c_game+0x3F0 → +0x1C9C，候选值源自 2.57 源，2.59 待校验）
+		// ballistics 容器内导弹 CCIP 落点（c_game+0x3F0 → +0x1C9C，候选值源自 2.57 源）
+		// ★2.59 实测否定：bc_ccip_dump 显示 0x1B00~0x2000 全是配置/常量（风阻参数循环、哨兵值
+		// 2147440000/1000000、id 对），无任何世界坐标——落点向量应在弹体对象内部（待 0x2000 dump 校准）
 		constexpr uintptr_t rocket_impact_point = 0x1C9C;
 
 		constexpr uint32_t  max_missiles    = 16;
