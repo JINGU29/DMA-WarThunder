@@ -154,6 +154,25 @@ namespace esp
     {
         draw_crosshair( );
 
+        // ★校准进行中：进度显示替代白屏（渲染/菜单照常响应）
+        if ( !update::g_ready )
+        {
+            static const char* stageNames[ 6 ] = { "waiting", "window scan", "full-image scan",
+                                                   "retry", "finalizing", "starting" };
+            const int stage = update::g_scanStage;
+            const int perm = update::g_scanPermille;
+            const char* sName = ( stage >= 0 && stage < 6 ) ? stageNames[ stage ] : "?";
+            char buf[ 128 ];
+            snprintf( buf, sizeof( buf ), "offset calibration: %s  %d.%d%%",
+                      sName, perm / 10, perm % 10 );
+            const ImVec2 dsz = ImGui::GetIO( ).DisplaySize;
+            g_render->text( { dsz.x * 0.5f - 130.0f, dsz.y * 0.5f },
+                update::g_calibFailed ? IM_COL32( 255, 60, 60, 255 ) : IM_COL32( 80, 220, 255, 255 ),
+                1, update::g_calibFailed ? "calibration failed - check log" : buf,
+                g_render->fonts( ).m_esp );
+            return;
+        }
+
         // 从共享数据中拷贝一份
         const SGameData renderData = GetRenderData( );
         if ( !renderData.bIsValid )
@@ -437,6 +456,66 @@ namespace esp
 					for ( const auto& e : selEdges )
 						g_render->line( s[ e[ 0 ] ].x, s[ e[ 0 ] ].y, s[ e[ 1 ] ].x, s[ e[ 1 ] ].y,
 							IM_COL32( 60, 230, 255, 235 ), 2.2f );
+				}
+			}
+		}
+
+		// ── 幽灵盒（战争迷雾记忆列表）：消失后 15s 窗口内绘制——前 2s 按消失前速度滑行、
+		//    之后钉在最后位置（滑行量保持 vel×2s）；白灰半透 12 边 + 盒顶型号名 ──
+		if ( !renderData.ghosts.empty( ) )
+		{
+			const auto ghostNow = std::chrono::steady_clock::now( );
+			static const int ghostEdges[ 12 ][ 2 ] = { {0,1},{1,3},{3,2},{2,0},{4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7} };
+			constexpr ImU32 colGhost = IM_COL32( 210, 210, 210, 110 );
+			for ( const auto& gh : renderData.ghosts )
+			{
+				const float age = std::chrono::duration<float>( ghostNow - gh.lastSeen ).count( );
+				if ( age <= 0.0f || age >= 15.0f )
+					continue;   // 未消失或超显示窗口（条目仍保留，供无缝重连）
+
+				// 外推：滑行 2s 后钉住（与正常单位 age>2 回落采样点不同）
+				vec3_t exDelta{};
+				{
+					const float spd = gh.velocity.length( );
+					const float slide = ( age < 2.0f ) ? age : 2.0f;
+					if ( spd > 1.0f && spd < 1500.0f )
+					{
+						const vec3_t d = gh.velocity * slide;
+						if ( d.length( ) < 2000.0f )
+							exDelta = d;
+					}
+				}
+
+				std::array<vec2_t, 8> s;
+				bool ok = true;
+				for ( int i = 0; i < 8; ++i )
+				{
+					if ( !g_render->world_to_screen( gh.corners[ i ] + exDelta, s[ i ], camera_matrix ) )
+					{
+						ok = false;
+						break;
+					}
+				}
+				if ( !ok )
+					continue;   // 任一角在视点后 → 跳过（与部件标记同规则）
+
+				for ( const auto& ed : ghostEdges )
+					g_render->line( s[ ed[ 0 ] ].x, s[ ed[ 0 ] ].y, s[ ed[ 1 ] ].x, s[ ed[ 1 ] ].y, colGhost, 1.5f );
+
+				// 型号名（盒顶上方居中，白灰半透）
+				if ( !gh.dispName.empty( ) )
+				{
+					float topY = s[ 0 ].y;
+					float cx = 0.0f;
+					for ( int i = 0; i < 8; ++i )
+					{
+						topY = (std::min)( topY, s[ i ].y );
+						cx += s[ i ].x;
+					}
+					cx /= 8.0f;
+					const ImVec2 tsz = ImGui::CalcTextSize( gh.dispName.c_str( ) );
+					g_render->text( { cx - tsz.x * 0.5f, topY - 20.0f }, IM_COL32( 210, 210, 210, 200 ), 1,
+						gh.dispName.c_str( ), g_render->fonts( ).m_esp );
 				}
 			}
 		}

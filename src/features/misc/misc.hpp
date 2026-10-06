@@ -705,7 +705,8 @@ namespace misc
 		}
 
 		// 在 archetype 元数据表中找含 tid 的 archetype，走 slot/偏移链拿 chunk 头
-		inline auto resolve_chunk = []( uint16_t tid, uintptr_t& cb, uint32_t& count, uint8_t& shift ) -> bool
+		inline auto resolve_chunk = []( uint16_t tid, uintptr_t& cb, uint32_t& count, uint8_t& shift,
+			uint16_t& compOffOut, uint32_t& aiOut ) -> bool
 		{
 			namespace ob = offsets::bullets;
 			const uintptr_t em = baseAddr + ob::entity_manager;
@@ -772,6 +773,8 @@ namespace misc
 				memcpy( &cb, cent, sizeof( cb ) );
 				memcpy( &count, cent + 8, sizeof( count ) );
 				shift = cent[ 0xC ];
+				compOffOut = compOff;
+				aiOut = ai;
 				return cb > 0x10000 && count > 0 && shift > 0 && shift <= 12;
 			}
 			return false;
@@ -785,9 +788,12 @@ namespace misc
 			data.missiles.clear( );
 			data.bHasRocketImpact = false;
 
+			// ★2026-10-06 回滚记录：曾误用 bullet 组件哈希(0xBC84D211，offsets 注释本就写明
+			// "bullet_component 描述哈希")动态解析"导弹 tid"→解析出子弹的 0x58→导弹链全灭。
+			// 实测 0x54(rocket)/0x59(bomb) 跨战局稳定（12:03 与 13:0x 两场均正常检出），保持硬编码。
 			const STypeParam types[ 2 ] = {
-				{ 0x54, 0x2C0, 0x2DC, false },   // rocket：arch33 实测 POS_OFF=+0x2C0，vel=+0x2DC ★dump 校准
-				{ 0x59, 0x244, 0x260, true },    // bomb：arch32 实测 POS_OFF=+0x244，vel=pos+0x1C 推定
+				{ 0x54, 0x2C0, 0x2DC, false },   // rocket：POS_OFF=+0x2C0，vel=+0x2DC ★dump 校准
+				{ 0x59, 0x244, 0x260, true },    // bomb：POS_OFF=+0x244，vel=pos+0x1C 推定
 			};
 
 			const int16_t myUnitIndex = ( myUnit > 0x10000 )
@@ -798,8 +804,13 @@ namespace misc
 				uintptr_t cb = 0;
 				uint32_t count = 0;
 				uint8_t shift = 0;
-				if ( !resolve_chunk( tp.typeId, cb, count, shift ) )
+				uint16_t compOff = 0;
+				uint32_t aidx = 0;
+				if ( !resolve_chunk( tp.typeId, cb, count, shift, compOff, aidx ) )
 					continue;
+
+				// （2026-10-06 清理：链诊断 dump 块已移除——校准任务闭环，避免首弹瞬间数百次
+				//  TRACE 文件开关造成的数据线程卡顿。如需重新校准，用 tools/orpheus 探针脚本。）
 				if ( count > om::max_missiles )
 					count = om::max_missiles;
 
@@ -843,103 +854,10 @@ namespace misc
 						++s_ownerLogCount;
 					}
 
-					// ── 校准 dump：每进程首次检测到导弹时，落盘弹体对象前 0x2000 字节（★扩到高位区找 CCIP
-					// 落点向量：容器 0x1C9C 已否定，obj 内部 0x800~0x2000 是下一个候选区）+ ballistics 容器 CCIP 区
-					// ★flag 在读成功后才置位：DMA 瞬时失败时下一帧重试（导弹持续在飞，机会不丢）
-					static bool s_calDumped = false;
-					if ( !s_calDumped )
-					{
-						constexpr size_t DUMP_SZ = 0x2000;
-						std::vector<uint8_t> dump( DUMP_SZ );
-						if ( TargetProcess->Read( objptr, dump.data( ), DUMP_SZ ) )
-						{
-							s_calDumped = true;
-							FILE* fp = nullptr;
-							fopen_s( &fp, "msl_obj_dump.bin", "wb" );
-							if ( fp ) { fwrite( dump.data( ), 1, DUMP_SZ, fp ); fclose( fp ); }
-							for ( size_t off = 0; off < DUMP_SZ; off += 8 )
-							{
-								uint64_t q = 0;
-								memcpy( &q, dump.data( ) + off, 8 );
-								float f0, f1;
-								memcpy( &f0, dump.data( ) + off, 4 );
-								memcpy( &f1, dump.data( ) + off + 4, 4 );
-								if ( q == 0 || q == 0xFFFFFFFFFFFFFFFFULL ) continue;
-								TRACE("CAL off=%03llx q=%016llx f=(%.3f,%.3f) %s",
-									off, q, f0, f1,
-									(q == myUnit) ? " <<< == myUnit!" :
-									((q & ~1ULL) == myUnit) ? " <<< == myUnit|tag!" :
-									(q > 0x10000000000ULL && q < 0x7FFFFFFFFFFFULL) ? "PTR" : "");
-							}
-							TRACE("CAL myUnit=%llx done", (unsigned long long)myUnit);
-						}
-
-						// CCIP 校准：ballistics 容器 +0x1B00..0x2000（候选 0x1C9C/0x1CCC）
-						const uintptr_t bc = TargetProcess->Read<uintptr_t>(
-							data.gameCtx.cGame + offsets::cgame_offsets::ballistic_offsets::ballistics_ptr );
-						if ( bc > 0x10000 )
-						{
-							constexpr uintptr_t CC_BASE = 0x1B00;
-							constexpr size_t CC_SZ = 0x500;
-							std::vector<uint8_t> cd( CC_SZ );
-							if ( TargetProcess->Read( bc + CC_BASE, cd.data( ), CC_SZ ) )
-							{
-								FILE* fp2 = nullptr;
-								fopen_s( &fp2, "bc_ccip_dump.bin", "wb" );
-								if ( fp2 ) { fwrite( cd.data( ), 1, CC_SZ, fp2 ); fclose( fp2 ); }
-								for ( size_t off = 0; off < CC_SZ; off += 8 )
-								{
-									uint64_t q = 0;
-									memcpy( &q, cd.data( ) + off, 8 );
-									float f0, f1;
-									memcpy( &f0, cd.data( ) + off, 4 );
-									memcpy( &f1, cd.data( ) + off + 4, 4 );
-									if ( q == 0 || q == 0xFFFFFFFFFFFFFFFFULL ) continue;
-									const uintptr_t realOff = CC_BASE + off;
-									TRACE("CCIP off=%04llx q=%016llx f=(%.1f,%.1f)%s",
-										realOff, q, f0, f1,
-										( realOff == 0x1C9C || realOff == 0x1CCC ) ? " <<< candidate" : "");
-								}
-							TRACE("CCIP bc=%llx done", (unsigned long long)bc);
-						}
-					}
-
-					// Guidance 结构 dump：★CCIP 落点已排除弹体 obj 0x0~0x2000（实为配置+发射点 vec3@0xF0
-					// + 子对象指针数组@0x1538）；2.57 源在 Guidance 内有 Position@0x1D0 候选
-					// ★dump 实测 0x648=0（三场次一致）——2.59 上该偏移非指针，probe 行用于确认
-					const uintptr_t gd = TargetProcess->Read<uintptr_t>( objptr + om::proj_guidance );
-					TRACE("GUID probe obj=%llx gd=%llx (0x648)", (unsigned long long)objptr, (unsigned long long)gd);
-					if ( gd > 0x10000 )
-					{
-						constexpr size_t GD_SZ = 0x400;
-						std::vector<uint8_t> gdb( GD_SZ );
-						if ( TargetProcess->Read( gd, gdb.data( ), GD_SZ ) )
-						{
-							FILE* fp3 = nullptr;
-							fopen_s( &fp3, "guid_dump.bin", "wb" );
-							if ( fp3 ) { fwrite( gdb.data( ), 1, GD_SZ, fp3 ); fclose( fp3 ); }
-							for ( size_t off = 0; off < GD_SZ; off += 8 )
-							{
-								uint64_t q = 0;
-								memcpy( &q, gdb.data( ) + off, 8 );
-								float f0, f1;
-								memcpy( &f0, gdb.data( ) + off, 4 );
-								memcpy( &f1, gdb.data( ) + off + 4, 4 );
-								if ( q == 0 || q == 0xFFFFFFFFFFFFFFFFULL ) continue;
-								TRACE("GUID off=%03llx q=%016llx f=(%.1f,%.1f) %s",
-									off, q, f0, f1,
-									( off == 0x1D0 ) ? " <<< candidate" :
-									( q > 0x10000000000ULL && q < 0x7FFFFFFFFFFFULL ) ? "PTR" : "");
-							}
-							TRACE("GUID gd=%llx done", (unsigned long long)gd);
-						}
-						else
-						{
-							// gd 看似合法但 0x400 读失败（DMA 瞬时/半映射）
-							TRACE("GUID read fail gd=%llx", (unsigned long long)gd);
-						}
-					}
-					}
+					// （2026-10-06 清理：校准 dump 块已移除——msl_obj_dump/CAL、bc_ccip_dump/CCIP、
+					//  GUID 探针均已完成使命（owner/pos/vel 校准闭环、CCIP 0x1C9C 与 0x648 实测否定），
+					//  避免首枚导弹出现瞬间 0x2000 DMA 读 + 数百行 TRACE 文件开关造成卡顿。
+					//  重新校准时用 tools/orpheus 探针脚本，见 docs/弹丸追踪-逆向编年史.md。）
 					// 方案 A：只标自己发射的（菜单可关看全部）
 					if ( misc::bMissileOwnOnly && !own )
 						continue;
@@ -999,6 +917,134 @@ namespace misc
 		}
 	}
 
+	// ── 幽灵缓存（战争迷雾记忆列表；方案见 docs/ai-offset-hunter-需求累积.md 第15轮定稿）──
+	// 语义：确认过的敌人（露过面）即入列，活跃期间每周期刷新；只有死亡判定成功才出列
+	//（+战斗结束/场景切换清空防护）。消失后 15 秒窗口内由渲染端画幽灵盒（滑 2 秒 → 钉住）。
+	// 同人认定：玩家名（链 unit+0xFA0 → +0x60，monkrel API 2.59.0.46）——跨地址重现时
+	// 按名字迁移条目实现无缝重连；玩家名只在活跃期读（首读缓存，空则 5s 重试）。
+	// 崩溃安全：探测只对“已从列表消失”的旧地址做同步平读（≤32 条/周期、平坦字段不追
+	// 指针、读失败保留），不并入主 scatter；探测期不重读名字。
+	struct SGhostEntry
+	{
+		uintptr_t addr = 0;
+		std::array<vec3_t, 8> corners{};
+		vec3_t velocity{};
+		std::string dispName;      // 型号名（活跃期随 vehicleName 更新；空值不覆盖旧名）
+		std::string playerName;    // 玩家名（同人匹配键）
+		std::chrono::steady_clock::time_point lastSeen{};     // 最后一次活跃刷新（==unitScatterTime 判活跃）
+		std::chrono::steady_clock::time_point lastPNameTry{}; // 玩家名重试节流
+	};
+	inline std::vector<SGhostEntry> g_ghostList;
+	inline uintptr_t g_ghostListBase = 0;   // 场景防护：unit 列表基址（变化 = 场景切换 → 清空）
+	constexpr size_t kGhostMax = 128;       // 容量上限（满淘汰最旧）
+	constexpr int    kGhostProbeMax = 32;   // 同步平读探测上限（条/周期）
+
+	// 死特征判定：state>=2 或（地面单位残骸位 0x08000000；被过滤实体与探测共用）
+	inline auto ghost_is_dead_feature( uint16_t state, uint32_t flags, uint8_t type ) -> bool
+	{
+		return state >= 2 || ( type == 3 && ( flags & 0x08000000u ) != 0 );
+	}
+
+	// 玩家名链读取（仅活跃地址调用）：unit+0xFA0(m_PlayerInfo) → +0x60(m_Name) → 字符串
+	// 自校：本地玩家名读出应=本人游戏名（见 GameUpdate [GHOST] self-name 打点）
+	inline auto ghost_read_player_name( uintptr_t unitAddr ) -> std::string
+	{
+		const uintptr_t pinfo = TargetProcess->Read<uintptr_t>( unitAddr + offsets::unit_offsets::playerInfo_offset );
+		if ( pinfo <= 0x10000 )
+			return {};
+		const uintptr_t nptr = TargetProcess->Read<uintptr_t>( pinfo + offsets::localplayer::name_offset );
+		if ( nptr <= 0x10000 )
+			return {};
+		std::string nm = TargetProcess->ReadString( nptr, 96 );
+		// 零宽空格过滤（同型号名链规则）
+		const std::string zwsp = std::string( "\xE2\x80\x8B", 3 );
+		size_t pos = 0;
+		while ( ( pos = nm.find( zwsp, pos ) ) != std::string::npos )
+			nm.erase( pos, 3 );
+		return nm;
+	}
+
+	// 零成本判死：被过滤实体（含迷雾态）命中死特征且 addr 在表 → 出列
+	inline auto ghost_check_dead_perfilter( uintptr_t addr, uint16_t state, uint32_t flags, uint8_t type ) -> void
+	{
+		if ( !ghost_is_dead_feature( state, flags, type ) )
+			return;
+		for ( auto it = g_ghostList.begin( ); it != g_ghostList.end( ); )
+		{
+			if ( it->addr == addr )
+			{
+				LOG( "[GHOST] dead(perfilter) addr=%llX st=%u fl=0x%08X ty=%u name=%s pname=%s\n",
+					(unsigned long long)addr, state, flags, type, it->dispName.c_str( ), it->playerName.c_str( ) );
+				it = g_ghostList.erase( it );
+			}
+			else
+				++it;
+		}
+	}
+
+	// upsert：活跃实体（通过全部过滤）入列/刷新；同人迁移（玩家名同且旧条目非活跃）
+	inline auto ghost_upsert( const SImGuiUnit& unit, std::chrono::steady_clock::time_point tScatter ) -> void
+	{
+		SGhostEntry* e = nullptr;
+		for ( auto& g : g_ghostList )
+			if ( g.addr == unit.unitAddr ) { e = &g; break; }
+
+		if ( !e )
+		{
+			// 同人迁移：仅新建/迁移路径读玩家名（活跃刷新期零开销）
+			const std::string pname = ghost_read_player_name( unit.unitAddr );
+			if ( !pname.empty( ) )
+			{
+				for ( auto& g : g_ghostList )
+				{
+					if ( g.playerName == pname && g.lastSeen != tScatter )
+					{
+						g.addr = unit.unitAddr;   // 迷雾换地址重建 → 条目迁移（无缝重连）
+						e = &g;
+						LOG( "[GHOST] migrate addr=%llX pname=%s\n",
+							(unsigned long long)unit.unitAddr, pname.c_str( ) );
+						break;
+					}
+				}
+			}
+			if ( !e )
+			{
+				if ( g_ghostList.size( ) >= kGhostMax )
+				{
+					// 满：淘汰 lastSeen 最旧者
+					auto oldest = g_ghostList.begin( );
+					for ( auto it = g_ghostList.begin( ); it != g_ghostList.end( ); ++it )
+						if ( it->lastSeen < oldest->lastSeen )
+							oldest = it;
+					g_ghostList.erase( oldest );
+				}
+				SGhostEntry ne;
+				ne.addr = unit.unitAddr;
+				ne.playerName = pname;
+				ne.lastPNameTry = tScatter;
+				g_ghostList.push_back( std::move( ne ) );
+				e = &g_ghostList.back( );
+				LOG( "[GHOST] new addr=%llX name=%s pname=%s\n",
+					(unsigned long long)unit.unitAddr, unit.vehicleName.c_str( ), pname.c_str( ) );
+			}
+			else
+				e->playerName = pname;    // 迁移：写入名字（pname 必非空）
+		}
+		else if ( e->playerName.empty( )
+			&& std::chrono::duration_cast<std::chrono::milliseconds>( tScatter - e->lastPNameTry ).count( ) >= 5000 )
+		{
+			// 活跃期玩家名补读（5s 节流；只对活跃地址读——红线）
+			e->lastPNameTry = tScatter;
+			e->playerName = ghost_read_player_name( unit.unitAddr );
+		}
+
+		e->corners = unit.worldCorners;
+		e->velocity = unit.velocity;
+		if ( !unit.vehicleName.empty( ) )
+			e->dispName = unit.vehicleName;
+		e->lastSeen = tScatter;
+	}
+
 	// GameUpdate：数据线程主函数 —— 批量 scatter read + 预计算
 	inline auto GameUpdate( ) -> void
 	{
@@ -1042,6 +1088,9 @@ namespace misc
 			g_gameData.bIsValid = false;
 			g_gameData.units.clear( );
 			g_gameData.bullets.clear( );
+			g_gameData.ghosts.clear( );
+			// 幽灵记忆列表随战斗结束清空（下局 unit 列表基址必然变化，双保险）
+			g_ghostList.clear( );
 			return;
 		}
 
@@ -1083,6 +1132,57 @@ namespace misc
 			return;
 		}
 		TRACE("GU count=%d list=%llx", unit_count, (unsigned long long)unit_list_base);
+
+		// 幽灵缓存场景防护：unit 列表基址变化 = 场景切换（新战局/换图）→ 清空记忆
+		if ( unit_list_base != g_ghostListBase )
+		{
+			if ( g_ghostListBase != 0 && !g_ghostList.empty( ) )
+				LOG( "[GHOST] list_base change %llX -> %llX, clear %d entries\n",
+					(unsigned long long)g_ghostListBase, (unsigned long long)unit_list_base, (int)g_ghostList.size( ) );
+			g_ghostListBase = unit_list_base;
+			g_ghostList.clear( );
+		}
+
+		// [GHOST] 玩家名链自校（节流复检：最多 12 次、5s 间隔、读出名字后停止）：本地玩家名应=本人游戏名；桥 unit+0xFA0 应回到同一 player 对象
+		{
+			static int s_ghostSelfTries = 0;
+			static auto s_ghostSelfNext = std::chrono::steady_clock::now( );
+			if ( s_ghostSelfTries < 12 && now >= s_ghostSelfNext )
+			{
+				s_ghostSelfNext = now + std::chrono::seconds( 5 );
+				++s_ghostSelfTries;
+				const uintptr_t lp = TargetProcess->Read<uintptr_t>( baseAddr + offsets::globals::local_player );
+				if ( lp > 0x10000 )
+				{
+					const uintptr_t nptr = TargetProcess->Read<uintptr_t>( lp + offsets::localplayer::name_offset );
+					std::string selfName;
+					if ( nptr > 0x10000 )
+						selfName = TargetProcess->ReadString( nptr, 96 );
+					// 诊断（首测 name='' 空）：dump lp+0x60 与 nptr 各 16 字节，判定布局（指针/内联字符串/UTF-16）
+					char hexA[ 64 ] = ""; char hexB[ 64 ] = "";
+					if ( selfName.empty( ) )
+					{
+						uint8_t dbuf[ 16 ] = { };
+						if ( TargetProcess->Read( lp + offsets::localplayer::name_offset, dbuf, sizeof( dbuf ) ) )
+							for ( int i = 0; i < 16; ++i ) snprintf( hexA + i * 3, 4, "%02X ", dbuf[ i ] );
+						if ( nptr > 0x10000 )
+						{
+							for ( int i = 0; i < 16; ++i ) dbuf[ i ] = 0;
+							if ( TargetProcess->Read( nptr, dbuf, sizeof( dbuf ) ) )
+								for ( int i = 0; i < 16; ++i ) snprintf( hexB + i * 3, 4, "%02X ", dbuf[ i ] );
+						}
+					}
+					const uintptr_t myUnitChk = TargetProcess->Read<uintptr_t>( baseAddr + offsets::globals::my_unit );
+					const uintptr_t bridge = ( myUnitChk > 0x10000 )
+						? TargetProcess->Read<uintptr_t>( myUnitChk + offsets::unit_offsets::playerInfo_offset ) : 0;
+					LOG( "[GHOST] self-name check: try=%d lp=%llX nptr=%llX name='%s' heap60=[%s] str=[%s] bridge=%llX same=%d\n",
+						s_ghostSelfTries, (unsigned long long)lp, (unsigned long long)nptr, selfName.c_str( ), hexA, hexB,
+						(unsigned long long)bridge, (int)( bridge == lp ) );
+					if ( !selfName.empty( ) )
+						s_ghostSelfTries = 12;   // 成功 → 停止复检
+				}
+			}
+		}
 
 		// --- 4. 全量 scatter read ---
 
@@ -1139,7 +1239,6 @@ struct UnitReadBuffer
 		uint16_t unitState;
 		uint8_t team;
 		uint8_t reloadTime;
-		uintptr_t groundMovement;
 		uint32_t flags; // unit + 0x90 起 4 字节（m_UnitFlags1-4），0x800 位疑似可见标志
 		uint8_t unitType; // unit + 0x8C（m_UnitType），Phase 0 探测：第三方 0/3/5 过滤依据
 		int16_t unitIndex; // unit + 0x8（int16）——导弹制导目标反查键
@@ -1157,13 +1256,12 @@ struct UnitReadBuffer
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitState_offset ), &buffers[i].unitState, sizeof( uint16_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::teamNum_offset ), &buffers[i].team, sizeof( uint8_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::visualReload_offset ), &buffers[i].reloadTime, sizeof( uint8_t ) );
-			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::groundmovement_offset ), &buffers[i].groundMovement, sizeof( uintptr_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitFlags1_offset ), &buffers[i].flags, sizeof( uint32_t ) );
 			TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitIndex_offset ), &buffers[i].unitIndex, sizeof( int16_t ) );
 		TargetProcess->AddScatterReadRequest( hScatter, uint64_t( addr + offsets::unit_offsets::unitType_offset ), &buffers[i].unitType, sizeof( uint8_t ) );
 		}
 
-		TRACE("GU p2 exec units=%zu (reqs=%zu)", numUnits, numUnits * 10);
+		TRACE("GU p2 exec units=%zu (reqs=%zu)", numUnits, numUnits * 9);
 		// ★位置采样基准：scatter 执行区间中点（无偏）。渲染端外推 age = renderNow − sampleTime
 		//   以此刻为基；此前 sampleTime 打在单位循环速度块（循环前还有弹丸/导弹/名字链等逐单位同步读），
 		//   靠后单位打戳晚 0.5~1s → age 被少算 → 框恒定落后 v×δ（150m/s×0.6s≈90m，2026-10-05 修复）
@@ -1234,6 +1332,9 @@ struct UnitReadBuffer
 		// 构建 SImGuiUnit 列表
 		for ( size_t i = 0; i < numUnits; i++ )
 		{
+			// 幽灵：死特征零成本判死（被过滤/迷雾态也覆盖：state>=2 或地面残骸位 → 出列）
+			ghost_check_dead_perfilter( validUnits[i], buffers[i].unitState, buffers[i].flags, buffers[i].unitType );
+
 			// 跳过无效敌人（含 type=3 残骸过滤）
 			if ( !is_valid_enemy( buffers[i].unitState, buffers[i].team, buffers[i].flags, buffers[i].unitType ) )
 				continue;
@@ -1293,36 +1394,36 @@ struct UnitReadBuffer
 			unit.unitIndex = buffers[i].unitIndex;
 			unit.reloadTime = buffers[i].reloadTime;
 
-			// 目标速度三段式：①地面运动容器(unit+0x2100→+0x5C，第三方 2.59.0.44 验证)
-			// ②空中运动容器(0xD50→+0x15E4) ③帧差分兜底。
-			// ★2.59.0.46 实测：0x2100 字段已是乱码（gm=...bf800000 含 -1.0f），读出 spd=inf 的
-			// 垃圾速度直通渲染 → 外推位移=inf → 8 角点全部投影失败 → 丢框。
-			// 因此容器指针必须范围校验、速度必须有限且 <1500m/s，不合格一律清零走帧差分。
+			// 目标速度：★2.59.0.46 重校准（2026-10-06 Orpheus 差分实测）。旧链
+			// unit+0x2100(→+0x5C) / 0xD50(→+0x15E4) 全死（0x2100 现为乱码、+0x15E4 读 (0,0,±1.2)）。
+			// 新链：unit+0x1158 / unit+0x12B8 两份同步容器拷贝 → vec3 @ 容器+0x104（+0x134 副本）。
+			// 合格线 5~1500 m/s，不合格自动走帧差分兜底（地面坦克速度未单独验证，兜底覆盖）。
 			{
 				vec3_t tgtVel{};
-				if ( buffers[i].groundMovement > 0x10000 && buffers[i].groundMovement < 0x7FFFFFFFFFFF )
+				auto tryContainer = [&]( uintptr_t contOff ) -> vec3_t {
+					const uintptr_t cont = TargetProcess->Read< uintptr_t >( validUnits[i] + contOff );
+					if ( cont < 0x10000 || cont > 0x7FFFFFFFFFFF )
+						return {};
+					const vec3_t v = TargetProcess->Read< vec3_t >( cont + offsets::unit_offsets::container_velocity );
+					const float s = v.length( );
+					if ( !std::isfinite( s ) || s < 5.0f || s >= 1500.0f )
+						return {};
+					return v;
+				};
+				tgtVel = tryContainer( offsets::unit_offsets::vel_container_a );
+				if ( tgtVel.length( ) < 0.5f )
+					tgtVel = tryContainer( offsets::unit_offsets::vel_container_b );
+				// 旧空中容器链兜底（2.59.0.44 及以下仍有效的场合）
+				if ( tgtVel.length( ) < 0.5f && unit.unitType == 0 )
 				{
-					tgtVel = TargetProcess->Read< vec3_t >( buffers[i].groundMovement + offsets::unit_offsets::ground_velocity_offset );
-				}
-				if ( unit.unitType == 0 )
-				{
-					// 空中单位：地面容器无效/不合格时尝试空中运动容器
 					const uintptr_t airMov = TargetProcess->Read< uintptr_t >( validUnits[i] + offsets::unit_offsets::airContainer_offset );
 					if ( airMov > 0x10000 && airMov < 0x7FFFFFFFFFFF )
 					{
 						const vec3_t airVel = TargetProcess->Read< vec3_t >( airMov + 0x15E4 );
-						if ( std::isfinite( airVel.x ) && std::isfinite( airVel.y ) && std::isfinite( airVel.z ) )
+						const float s = airVel.length( );
+						if ( std::isfinite( s ) && s >= 5.0f && s < 1500.0f )
 							tgtVel = airVel;
 					}
-				}
-
-				// 速度合格性校验：有限且 5~1500 m/s。
-				// ★2.59 实测：空中容器残留垃圾 (0,0,±1.2) 长度 1.2 —— 若只查 <1500 会漏过，
-				// 又挡住帧差分兜底门槛（<0.5），导致外推拿 1.2m/s 假速度 = 框冻结整个采样周期
-				{
-					const float spd = tgtVel.length( );
-					if ( !std::isfinite( spd ) || spd >= 1500.0f || spd < 5.0f )
-						tgtVel = {};
 				}
 
 				// ③ 帧差分兜底：容器速度失效（0 或被清零）时用上一帧位置差算速度
@@ -1429,7 +1530,43 @@ struct UnitReadBuffer
 			unit.worldCorners[6] = { pos.x + rx0.x + fy1.x + uz1.x, pos.y + rx0.y + fy1.y + uz1.y, pos.z + rx0.z + fy1.z + uz1.z };
 			unit.worldCorners[7] = { pos.x + rx1.x + fy1.x + uz1.x, pos.y + rx1.y + fy1.y + uz1.y, pos.z + rx1.z + fy1.z + uz1.z };
 
+			// 幽灵记忆列表：入列/刷新（addr 命中→更新；玩家名同人且旧条目非活跃→迁移；否则新建）
+			ghost_upsert( unit, unitScatterTime );
+
 				computedData.units.push_back( std::move( unit ) );
+		}
+
+		// --- 幽灵探测 pass：已从列表消失（lastSeen≠本周期）且 addr 不在本周期列表者，
+		//     同步平读判死（仿空战外推读法：≤32 条/周期、平坦字段不追指针、读失败保留）---
+		{
+			int ghostProbes = 0;
+			for ( size_t k = 0; k < g_ghostList.size( ); )
+			{
+				SGhostEntry& gh = g_ghostList[ k ];
+				if ( gh.lastSeen == unitScatterTime ) { ++k; continue; }   // 活跃条目
+
+				bool inList = false;
+				for ( size_t m = 0; m < numUnits; ++m )
+					if ( validUnits[ m ] == gh.addr ) { inList = true; break; }
+				if ( inList ) { ++k; continue; }   // 仍在列表（迷雾态）：零成本判死覆盖
+
+				if ( ghostProbes >= kGhostProbeMax || gh.addr < 0x10000 ) { ++k; continue; }
+				++ghostProbes;
+
+				uint16_t st = 0; uint32_t fl = 0; uint8_t ty = 0;
+				const bool okRead =
+					TargetProcess->Read( gh.addr + offsets::unit_offsets::unitState_offset, &st, sizeof( st ) )
+					&& TargetProcess->Read( gh.addr + offsets::unit_offsets::unitFlags1_offset, &fl, sizeof( fl ) )
+					&& TargetProcess->Read( gh.addr + offsets::unit_offsets::unitType_offset, &ty, sizeof( ty ) );
+				if ( okRead && ghost_is_dead_feature( st, fl, ty ) )
+				{
+					LOG( "[GHOST] dead(probe) addr=%llX st=%u fl=0x%08X ty=%u name=%s pname=%s\n",
+						(unsigned long long)gh.addr, st, fl, ty, gh.dispName.c_str( ), gh.playerName.c_str( ) );
+					g_ghostList.erase( g_ghostList.begin( ) + k );
+				}
+				else
+					++k;   // 未死或读失败 → 保留（fail-safe）
+			}
 		}
 
 		// --- Phase 0 探测日志 v3（5 秒一次）：unitAddr 身份跟踪 + 消失原因 + 重生标记 ---
@@ -1566,7 +1703,10 @@ struct UnitReadBuffer
 		if ( !computedData.bLocalIsPlane
 			&& ( bPartMarkersCrew || bPartMarkersAmmo || bPartMarkersFuel || bPartMarkersBreech ) )
 		{
-			int fetchBudget = 6;
+			// ★预算 6→2（2026-10-06）：新单位批量入场时一次拉 6 个 = 数百次串行 DMA 读
+			//   → 渲染线程 960ms 级卡顿（HITCHSTAT maxgap=958~972ms 实测）。2/轮摊薄，
+			//   满缓存多花几个周期（数据线程提速后一轮 ~130ms，无感）
+			int fetchBudget = 2;
 			const auto nowMesh = std::chrono::steady_clock::now( );
 
 			for ( auto& u : computedData.units )
@@ -1656,6 +1796,19 @@ struct UnitReadBuffer
 		}
 
 		computedData.bIsValid = true;
+
+		// --- 幽灵快照输出：本周期未刷新（lastSeen≠T）的条目 → 渲染端 15s 窗口绘制 ---
+		for ( const auto& gh : g_ghostList )
+		{
+			if ( gh.lastSeen == unitScatterTime )
+				continue;
+			SGhostUnit gu;
+			gu.corners = gh.corners;
+			gu.velocity = gh.velocity;
+			gu.dispName = gh.dispName;
+			gu.lastSeen = gh.lastSeen;
+			computedData.ghosts.push_back( std::move( gu ) );
+		}
 
 		// --- 6. 写入共享数据（加锁） ---
 		{

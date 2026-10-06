@@ -675,6 +675,140 @@ uint64_t c_memory::FindSignature(const char* signature, uint64_t range_start, ui
 	return first_match;
 }
 
+// 单缓冲内朴素匹配一个签名（FindSignaturesMulti 的逐块匹配核心）
+// 返回命中位置相对 buffer 起点的偏移，未命中返回 SIZE_MAX
+static size_t MatchSigInBuffer(const uint8_t* buffer, size_t bufLen, const char* sig)
+{
+	// 预展开模式为 (value, isWildcard) 序列，避免热循环里逐字符解析十六进制
+	struct SigByte { uint8_t val; bool wild; };
+	SigByte seq[256];
+	size_t seqLen = 0;
+	const char* p = sig;
+	while (*p && seqLen < 256)
+	{
+		// ★统一跳空白：兼容 "? ? ? ?"（单问号+空格）、"?? ??"、"48 8B" 混排。
+		//   旧实现通配分支吃单个 '?' 后不跳尾随空格，导致下一个空格被当作 hex 字节喂给
+		//   GetByte → 模式序列错位、所有带通配签名永不命中（曾致冷启动 10/13 missing，
+		//   恰为 10 条含 '?' 的全局根签名，3 条纯字面 DM 签名不受影响）。
+		if (*p == ' ' || *p == '\t')
+		{
+			++p;
+			continue;
+		}
+		if (*p == '?')
+		{
+			seq[seqLen++] = { 0, true };
+			p += (p[1] == '?') ? 2 : 1;   // 吃 "??" 或单 "?"
+		}
+		else
+		{
+			seq[seqLen++] = { GetByte(p), false };
+			p += 2;                        // 两 hex 字符；尾随空格由循环开头统一跳过
+		}
+	}
+	if (seqLen == 0 || seqLen > bufLen)
+		return SIZE_MAX;
+
+	const size_t last = bufLen - seqLen;
+	for (size_t i = 0; i <= last; ++i)
+	{
+		size_t j = 0;
+		for (; j < seqLen; ++j)
+		{
+			if (!seq[j].wild && buffer[i + j] != seq[j].val)
+				break;
+		}
+		if (j == seqLen)
+			return i;
+	}
+	return SIZE_MAX;
+}
+
+size_t c_memory::FindSignaturesMulti(const std::vector<const char*>& signatures, uint64_t range_start,
+	uint64_t range_end, std::vector<uint64_t>& out_hits, size_t chunk_size,
+	const std::function<void(size_t, size_t)>& progress, int PID)
+{
+	out_hits.assign(signatures.size(), 0);
+	if (range_start >= range_end || signatures.empty())
+		return 0;
+	if (PID == 0)
+		PID = this->current_process.PID;
+	if (chunk_size < 0x10000)
+		chunk_size = 0x10000;
+
+	// 重叠窗口 ≥ 最长签名长度（跨界命中在任一相邻块内都完整出现）
+	size_t maxPatBytes = 0;
+	for (const char* s : signatures)
+	{
+		size_t n = 0;
+		for (const char* p = s; *p; ++p)
+			if (*p != ' ') ++n;
+		// hex 串字节数 ≈ 非' '字符数 / 2 + 通配符数 —— 直接给上限
+		if (n / 2 + 8 > maxPatBytes) maxPatBytes = n / 2 + 8;
+	}
+	if (maxPatBytes < 64) maxPatBytes = 64;
+
+	const uint64_t total = range_end - range_start;
+	const uint64_t step = (uint64_t)chunk_size;
+	size_t doneBytes = 0;
+	size_t hitCount = 0;
+
+	for (uint64_t pos = range_start; pos < range_end && hitCount < signatures.size(); pos += step)
+	{
+		const uint64_t readStart = pos;
+		uint64_t readEnd = pos + step + maxPatBytes;
+		if (readEnd > range_end) readEnd = range_end;
+		const size_t bufLen = (size_t)(readEnd - readStart);
+
+		std::vector<uint8_t> buf(bufLen);
+		bool readOk = false;
+		// ★DMA 整读瞬态对策（2026-10-06）：大块读偶发返回全零缓冲（MemReadEx 返回 true 但内容
+		//   全零——update.hpp c_local 注释记录的"整读瞬态"）。全零采样检测 → 250ms 后重试一次。
+		for (int attempt = 0; attempt < 2 && !readOk; ++attempt)
+		{
+			if (attempt > 0)
+				std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			if (!VMMDLL_MemReadEx(this->vHandle, PID, readStart, buf.data(), buf.size(), 0, VMMDLL_FLAG_NOCACHE))
+				continue;
+			readOk = true;
+			bool allZero = true;
+			for (size_t k = 0; k < bufLen; k += 4096)
+			{
+				if (buf[k]) { allZero = false; break; }
+			}
+			if (allZero)
+			{
+				TRACE("SigScan zero-block @%llx cb=%zx (DMA transient) — retry", readStart, buf.size());
+				readOk = false;
+			}
+		}
+		if (!readOk)
+		{
+			// 块读失败/持续全零（页未映射等）：跳过该块继续
+			doneBytes = (size_t)(readEnd - range_start);
+			if (progress) progress(doneBytes, (size_t)total);
+			continue;
+		}
+
+		for (size_t si = 0; si < signatures.size(); ++si)
+		{
+			if (out_hits[si])
+				continue;
+			const size_t off = MatchSigInBuffer(buf.data(), bufLen, signatures[si]);
+			if (off != SIZE_MAX)
+			{
+				out_hits[si] = readStart + off;
+				++hitCount;
+			}
+		}
+
+		doneBytes = (size_t)(readEnd - range_start);
+		if (progress)
+			progress(doneBytes, (size_t)total);
+	}
+	return hitCount;
+}
+
 bool c_memory::Write(uintptr_t address, void* buffer, size_t size) const
 {
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
@@ -744,7 +878,6 @@ VMMDLL_SCATTER_HANDLE c_memory::CreateScatterHandle(int pid)
 
 void c_memory::CloseScatterHandle(VMMDLL_SCATTER_HANDLE handle)
 {
-	TRACE("CloseScatterHandle %p", (void*)handle);
 	VMMDLL_Scatter_CloseHandle(handle);
 }
 
@@ -761,15 +894,15 @@ bool c_memory::ClearScatterHandle(VMMDLL_SCATTER_HANDLE handle)
 
 bool c_memory::AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)
 {
+	// ★2026-10-06 清理：此函数每轮被调用 ~1200 次（107 单位 × 10 字段 + 全局），
+	// 原"每次请求 2 行 TRACE"（fopen/fflush/fclose ×2） alone 就吃掉 ~0.6-1.5s/轮——
+	// 是采样轮次 1.18s 的最大元凶（crash_trace.log 曾达 105MB）。只保留失败分支。
 	DWORD memoryPrepared = NULL;
-	TRACE("Add h=%p va=%llx cb=%zx pb=%p", (void*)handle, address, size, buffer);
 	if (!VMMDLL_Scatter_PrepareEx(handle, address, size, (PBYTE)buffer, &memoryPrepared))
 	{
 		TRACE("Add FAIL h=%p va=%llx cb=%zx", (void*)handle, address, size);
-		//	LOG("[!] Failed to prepare scatter read at 0x%p\n", address);
 		return false;
 	}
-	TRACE("Add ok  h=%p va=%llx prepared=%u", (void*)handle, address, memoryPrepared);
 	return true;
 }
 
@@ -824,12 +957,11 @@ bool c_memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle, bool bClear)
 
 bool c_memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid, bool bClear)
 {
-	TRACE("Exec enter h=%p pid=%d clear=%d", (void*)handle, pid, (int)bClear);
+	// ★2026-10-06 清理：每轮 2 次 scatter 执行 × 5 行 TRACE 一并移除（同 AddScatterReadRequest）
 	if (pid == 0)
 		pid = this->current_process.PID;
 
 	BOOL bExec = VMMDLL_Scatter_ExecuteRead(handle);
-	TRACE("Exec ExecuteRead h=%p ret=%d", (void*)handle, (int)bExec);
 	if (!bExec)
 	{
 		LOG("[-] Failed to Execute Scatter Read\n");
@@ -839,15 +971,12 @@ bool c_memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid, bool bC
 	//Clear after using it
 	if (bClear)
 	{
-		BOOL bClr = VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE);
-		TRACE("Exec Clear h=%p ret=%d", (void*)handle, (int)bClr);
-		if (!bClr)
+		if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
 		{
 			LOG("[-] Failed to Clear Scatter\n");
 			return false;
 		}
 	}
-	TRACE("Exec exit h=%p", (void*)handle);
 	return true;
 }
 

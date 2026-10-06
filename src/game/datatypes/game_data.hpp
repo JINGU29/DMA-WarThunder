@@ -97,6 +97,17 @@ struct SImGuiUnit
 	int aimPartIdx = -1;
 };
 
+// 幽灵盒（战争迷雾记忆列表的渲染快照；数据线程写、渲染线程读）
+// 语义：确认过的敌人消失后 7 秒窗口内绘制——前 2 秒按消失前速度滑行、之后钉住。
+// lastSeen = 最后一次活跃刷新的采样时刻（数据线程 unitScatterTime），渲染端 age=now−lastSeen。
+struct SGhostUnit
+{
+	std::array<vec3_t, 8> corners{};   // 消失前最后 8 个世界角点
+	vec3_t velocity{};                 // 消失前速度（渲染端外推：exDelta=vel×min(age,2s)）
+	std::string dispName;              // 型号名（盒顶显示）
+	std::chrono::steady_clock::time_point lastSeen;
+};
+
 // 单发在飞弹丸（数据线程写、渲染线程读；来源 ECS bullet_component，链路见 docs/弹丸追踪-逆向编年史.md）
 // 采集端已过滤：死槽（全零/非有限值）、飞机（行寿命>30s 的恒速记录）
 struct SImGuiBullet
@@ -159,6 +170,9 @@ struct SGameData
 
 	// 在飞导弹/炸弹（含名字与敌我归属）
 	std::vector<SImGuiMissile> missiles;
+
+	// 幽灵盒快照（记忆列表中本周期未刷新的条目；渲染端按 7s 窗口绘制）
+	std::vector<SGhostUnit> ghosts;
 
 	// 导弹 CCIP 落点（ballistics 容器 +0x1C9C 候选；飞机模式且读数有效时置位）
 	bool bHasRocketImpact = false;

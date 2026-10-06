@@ -2,7 +2,9 @@
 
 #include <cstdint>
 
-// War Thunder 2.59.0.44 offsets - dumped from WT/OPS (monkrel.cc)
+// War Thunder 2.59.0.46 offsets - dumped from WT/OPS (monkrel.cc)
+// 2026-10-05 同步 API 2.59.0.46（65 项）: globals 整体平移 +0x1F00/+0x2030/+0x2080；
+// 结构体内部偏移经逐项比对不变；Projectile 名字容器 +0x38（0x6E8→0x720，0x6E0→0x718）
 namespace offsets
 {
 	// Global offsets (from module base)
@@ -10,49 +12,51 @@ namespace offsets
 	{
 		// g_GameContext -> c_game pointer (was cgame_offset)
 		// 使用 inline 而非 constexpr，允许 update.hpp 特征码扫描后运行时覆盖
-		inline uintptr_t game_context = 0x7A23268;
+		inline uintptr_t game_context = 0x7A252E8;
 		// g_LocalPlayer -> local player entity (was localplayer_offset)
-		inline uintptr_t local_player = 0x79FA898;
+		inline uintptr_t local_player = 0x79FC8C8;
 		// g_MyUnit -> local player's current unit
-		constexpr uintptr_t my_unit = 0x7A25210;
+		inline uintptr_t my_unit = 0x7A27290;
 		// g_ViewAngles
-		constexpr uintptr_t view_angles = 0x7A27D78;
+		inline uintptr_t view_angles = 0x7A29DF8;
 		// g_ViewMatrix
-		constexpr uintptr_t view_matrix = 0x7A7D2F8;
+		inline uintptr_t view_matrix = 0x7A7F378;
 		// g_IsScoping
-		constexpr uintptr_t is_scoping = 0x7A6C47C;
+		constexpr uintptr_t is_scoping = 0x7A6E4FC;
 		// g_ScreenWidth
-		constexpr uintptr_t screen_width = 0x7E695D0;
+		constexpr uintptr_t screen_width = 0x7E6B4D0;
 		// g_HudInfo
-		constexpr uintptr_t hud_info = 0x7A22890;
+		inline uintptr_t hud_info = 0x7A24910;
 		// g_GameOptics
-		constexpr uintptr_t game_optics = 0x7A250E0;
+		inline uintptr_t game_optics = 0x7A27160;
 		// g_AirPredictionBool
-		constexpr uintptr_t air_prediction_bool = 0x7E8BDA0;
-		// g_AllListData (not in 2.59.0.44 API dump, keeping old value)
+		constexpr uintptr_t air_prediction_bool = 0x7E8DCA0;
+		// g_AllListData (not in 2.59.0.46 API dump either, keeping old value)
 		constexpr uintptr_t all_list_data = 0x74CF748;
 		// g_BombListIndexPtr
-		constexpr uintptr_t bomb_list_index_ptr = 0x79FDF10;
+		constexpr uintptr_t bomb_list_index_ptr = 0x79FFF40;
 		// g_RocketListIndexPtr
-		constexpr uintptr_t rocket_list_index_ptr = 0x79FF450;
+		constexpr uintptr_t rocket_list_index_ptr = 0x7A01480;
 		// g_UIPosArr
-		constexpr uintptr_t ui_pos_arr = 0x7A6F6A8;
+		constexpr uintptr_t ui_pos_arr = 0x7A71728;
 	}
 
 	namespace cgame_offsets
 	{
 		constexpr uintptr_t ballistics_offset = 0x3F0;
-		constexpr uintptr_t camera_offset = 0x660;
+		// camera_offset 由 update.hpp 代码区签名 sig_camera_offset 运行时重定位（允许覆盖）
+		inline uintptr_t camera_offset = 0x660;
 		constexpr uintptr_t current_map = 0x1F0;
 
 		// Unit lists (group 3 - active units)
 		constexpr uintptr_t unit_list_1 = 0x310;
 		constexpr uintptr_t unit_list_2 = 0x328;
-		constexpr uintptr_t unit_list_3 = 0x340;
+		// unit_list_3 / unit_count_3 由 update.hpp sig_unit_enum 运行时重定位（允许覆盖）
+		inline uintptr_t unit_list_3 = 0x340;
 
 		constexpr uintptr_t unit_count_1 = 0x320;
 		constexpr uintptr_t unit_count_2 = 0x338;
-		constexpr uintptr_t unit_count_3 = 0x350;
+		inline uintptr_t unit_count_3 = 0x350;
 
 		namespace camera_offsets
 		{
@@ -69,8 +73,13 @@ namespace offsets
 			// velocity 用用户提供的第三方验证偏移 0x2118
 			// (ballistics 容器: c_game + 0x3f0 -> + 0x2118 = 弹速 float)
 			constexpr uintptr_t velocity = 0x2118;
-			constexpr uintptr_t mass = 0x205C;
-			constexpr uintptr_t caliber = 0x2060;
+			// mass/caliber 2026-10-06 DMA 实测校订：M2A4 实弹块(与 velocity 同源簇)。
+			// 用 0.87kg/0.037m 在 ballistics 容器内值猎捕，唯一命中 0x2124/0x2128；
+			// 旧值 0x205C/0x2060 实测不含 0.87/0.037(属武器模板块)。
+			// 注：唯一消费者 GetBallisticsInfo()/BallisticsPrediction 当前全项目无调用点
+			// (aimbot 实 run() 走硬编码 850 简化预测)，故这几个值现无运行影响。
+			constexpr uintptr_t mass = 0x2124;
+			constexpr uintptr_t caliber = 0x2128;
 			constexpr uintptr_t length = 0x2048;
 			constexpr uintptr_t max_dist = 0x2068;
 			constexpr uintptr_t selected_unit_ptr = 0x6B0;
@@ -123,8 +132,15 @@ namespace offsets
 		constexpr uintptr_t info_offset = 0x1028;
 		constexpr uintptr_t invulnerable_offset = 0xE98;
 		constexpr uintptr_t invulTimer_offset = 0xE74;
-		constexpr uintptr_t velocity_offset = 0x2100;
-		constexpr uintptr_t airContainer_offset = 0xD50;
+		constexpr uintptr_t velocity_offset = 0x2100;   // ★2.59.0.46 已死：实测乱码（含 float -1.0 片段），勿用
+		// ★2.59.0.46 速度链重校准（2026-10-06 Orpheus 差分实测，本地飞行 155~335m/s）：
+		// unit+0x1158 / unit+0x12B8 = 两份同步运动容器拷贝，速度 vec3 @ 容器+0x104（+0x134 副本）。
+		// 匀速段误差 2.4m/s，急加速段游戏侧平滑滞后 ~5%；历史环 0x40 步长 ×10 位于 0x12B8 容器+0x12B8。
+		// 旧地面容器+0x5C / 空中容器+0x15E4 全部失效；地面坦克速度此字段未单独验证——帧差分兜底。
+		constexpr uintptr_t vel_container_a = 0x1158;
+		constexpr uintptr_t vel_container_b = 0x12B8;
+		constexpr uintptr_t container_velocity = 0x104;
+		constexpr uintptr_t airContainer_offset = 0xD50;  // ★2.59.0.46 已死：+0x15E4 读出 (0,0,±1.2) 垃圾
 		constexpr uintptr_t armory_offset = 0x10D0;
 		constexpr uintptr_t damageModelCont_offset = 0x10A8;
 		constexpr uintptr_t playerInfo_offset = 0xFA0;
@@ -182,7 +198,9 @@ namespace offsets
 	namespace bullets
 	{
 		// EM 在模块内的 RVA（inline 允许 update.hpp 签名扫描运行时覆盖）
-		inline uintptr_t entity_manager = 0x7E64848;
+		// 2026-10-06 静态 dump 定向验证校准 .48 基线：旧值 0x7E64848 在本 dump 已 0 引用（过期），
+		// 0x7E66768 有 1604 处合法 RIP 引用且与运行时 bullets_em_sig 重定位结果一致，故更新兜底基线。
+		inline uintptr_t entity_manager = 0x7E66768;
 
 		constexpr uint32_t  comp_hash = 0xBC84D211;  // bullet_component 描述哈希（EM+0x260 哈希表键）
 		constexpr uint32_t  type_hash = 0xD5EFE099;  // 类型校验哈希（EM+0x278 表项高 32 位 = getter 第 4 参）
@@ -215,7 +233,7 @@ namespace offsets
 	//   activeColumn     = storage + (compOff[1]<<shift)（u8/条）
 	//   active[i]==1 → projectile = [projectileColumn + i*8]
 	// Projectile 字段：+0x2C8 pos(vec3)  +0x2E4 vel(vec3)  +0x48 owner(unit)
-	//   导弹 +0x6E8 → NameCont（+0x50 名字文本）  炸弹 +0x6E0 → NameCont（+0x10 名字文本）
+	//   导弹 +0x720 → NameCont（+0x50 名字文本）  炸弹 +0x718 → NameCont（+0x10 名字文本）
 	namespace missiles
 	{
 		constexpr uintptr_t em_index_table   = 0x5E8;     // [EM+0x5E8] 索引表指针
@@ -228,8 +246,8 @@ namespace offsets
 		constexpr uintptr_t proj_pos         = 0x2C0;     // vec3 世界坐标 ★2.59 dump 校准（rocket@0x2C0 / bomb@0x244，missile_pass STypeParam 表）
 		constexpr uintptr_t proj_vel         = 0x2DC;     // vec3 速度 ★2.59 dump 校准（=pos+0x1C；rocket@0x2DC / bomb@0x260；0x2E4 只是它的 z 分量）
 		constexpr uintptr_t proj_owner       = 0x58;      // owner unit 指针 ★2.59 dump 校准（tagged：低位=flag，比较前 &~1；0x48 是 u32 对(3,0x66474) 非指针）
-		constexpr uintptr_t proj_namecont_ms = 0x6E8;     // 导弹名字容器指针
-		constexpr uintptr_t proj_namecont_bomb = 0x6E0;   // 炸弹名字容器指针
+		constexpr uintptr_t proj_namecont_ms = 0x720;     // 导弹名字容器指针 ★2.59.0.46 API（.44 探针 0x6E8，+0x38）
+		constexpr uintptr_t proj_namecont_bomb = 0x718;   // 炸弹名字容器指针 ★2.59.0.46 API（.44 探针 0x6E0，+0x38）
 		constexpr uintptr_t namecont_text_ms = 0x50;      // 名字文本偏移（导弹）
 		constexpr uintptr_t namecont_text_bomb = 0x10;    // 名字文本偏移（炸弹）
 

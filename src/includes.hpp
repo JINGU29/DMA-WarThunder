@@ -198,11 +198,11 @@ inline uint64_t baseSize = 0x0;
 
 #include "game\sdk.hpp"
 
+#include "core\update.hpp"
+
 #include "utils\utils.hpp"
 
 #include "features\features.hpp"
-
-#include "core\update.hpp"
 
 #include "core\core.hpp"
 

@@ -2,6 +2,9 @@
 
 #include "..\..\lib\dma\vmmdll.h"
 #include "..\..\lib\dma\leechcore.h"
+#include <vector>
+#include <functional>
+#include <string>
 #pragma comment(lib, "leechcore.lib")
 #pragma comment(lib, "FTD3XX.lib")
 #pragma comment(lib, "vmm.lib")
@@ -155,6 +158,19 @@ public:
 	 * \return address of signature
 	 */
 	uint64_t FindSignature(const char* signature, uint64_t range_start, uint64_t range_end, int PID = 0);
+
+	/**
+	 * \brief 多签名单遍扫描（★2026-10-06）：分块读入（含模式长度重叠），每个块对所有未命中
+	 *        签名同时匹配——N 个签名的全映像回退从 N×138MB DMA 降为 1×138MB。
+	 * \param signatures 签名数组（"48 ? ? ?" 风格）
+	 * \param out_hits 输出与 signatures 等长；未命中的项为 0
+	 * \param chunk_size 分块大小（默认 4MB）
+	 * \param progress 可选进度回调 (已扫字节, 总字节)，用于启动进度显示
+	 * \return 命中的签名数量
+	 */
+	size_t FindSignaturesMulti(const std::vector<const char*>& signatures, uint64_t range_start,
+		uint64_t range_end, std::vector<uint64_t>& out_hits, size_t chunk_size = 0x400000,
+		const std::function<void(size_t, size_t)>& progress = nullptr, int PID = 0);
 
 	/**
 	 * \brief Writes memory to the process

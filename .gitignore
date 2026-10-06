@@ -431,3 +431,12 @@ unm
 .qoder/
 # offsets 缓存文件（update.hpp 运行时生成）
 offsets
+
+# ── 仓库仅保留核心代码：以下非核心文件本地保留、不纳入版本库 ──
+CHANGELOG.md
+README.md
+un.md
+AGENTS.md
+grump-中文翻译.md
+.zcodeignore
+desktop_capture.png
